@@ -29,15 +29,15 @@ Per training sample it draws 2048 surface points and 4096 volume + 4096 near-sur
 Stage 1 trains the point cloud encoder, the triplane decoder with uncertainty-based token pruning, and the occupancy head.
 Reference hyperparameters (the defaults of `TrainingConfig(stage=1)` / `examples/train_shapenet.py`):
 
-| Hyperparameter | Value |
-|---|---|
-| Epochs | 100 (dataset repeated 16x per epoch) |
-| Batch size | 32 per GPU, 2x gradient accumulation |
-| Optimizer | AdamW (weight decay 0.01), constant LR |
-| Learning rate | 1e-4 x effective_batch_size / 256 (scaled automatically) |
-| Gradient clipping | 0.5 (global norm) |
-| Losses | occupancy BCE (volume 1.0, near 0.1) on refined + initial prediction, uncertainty MSE (coeff 0.01) |
-| Stochastic depth | 0.1 |
+| Hyperparameter    | Value                                                                                              |
+|-------------------|----------------------------------------------------------------------------------------------------|
+| Epochs            | 100 (dataset repeated 16x per epoch)                                                               |
+| Batch size        | 32 per GPU, 2x gradient accumulation                                                               |
+| Optimizer         | AdamW (weight decay 0.01), constant LR                                                             |
+| Learning rate     | 1e-4 x effective_batch_size / 256 (scaled automatically)                                           |
+| Gradient clipping | 0.5 (global norm)                                                                                  |
+| Losses            | occupancy BCE (volume 1.0, near 0.1) on refined + initial prediction, uncertainty MSE (coeff 0.01) |
+| Stochastic depth  | 0.1                                                                                                |
 
 On 16 GPUs:
 
@@ -56,11 +56,11 @@ For the JAX backend, run the same script with `--backend jax` from a single proc
 
 Stage 2 freezes the stage-1 autoencoder and trains only the latent compression modules (`latent_proj_in`, `latent_proj_out`, `latent_decoder`) with the feature matching loss (coeff 1.0), the occupancy reconstruction loss through the frozen decoder (coeff 1.0), and the KL term (effective coeff 1e-6; the reference config nominally says 1e-3 but applies it twice).
 
-| Hyperparameter | Value |
-|---|---|
-| Epochs | 100 |
-| Batch size | 128 per GPU, no accumulation |
-| LR schedule | 1e-4 (scaled as above), halved at epochs 60/70/80/90 |
+| Hyperparameter | Value                                                |
+|----------------|------------------------------------------------------|
+| Epochs         | 100                                                  |
+| Batch size     | 128 per GPU, no accumulation                         |
+| LR schedule    | 1e-4 (scaled as above), halved at epochs 60/70/80/90 |
 
 ```bash
 torchrun --nproc_per_node=16 examples/train_shapenet.py {root_dir} checkpoints/stage2 \
