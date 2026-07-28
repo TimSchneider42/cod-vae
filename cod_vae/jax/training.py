@@ -53,7 +53,9 @@ def _occupancy_loss(
     near_coeff: float,
 ) -> jnp.ndarray:
     losses = _bce_with_logits(logits, labels)
-    return vol_coeff * losses[:, :num_vol].mean() + near_coeff * losses[:, num_vol:].mean()
+    return (
+        vol_coeff * losses[:, :num_vol].mean() + near_coeff * losses[:, num_vol:].mean()
+    )
 
 
 def _stage1_loss(
@@ -94,7 +96,9 @@ def _stage1_loss(
     uncertainty_loss = jnp.mean((uncertainty - target) ** 2)
 
     loss = (
-        recon_loss + cfg.init_coeff * init_loss + cfg.uncertainty_coeff * uncertainty_loss
+        recon_loss
+        + cfg.init_coeff * init_loss
+        + cfg.uncertainty_coeff * uncertainty_loss
     )
     return loss, {
         "recon_loss": recon_loss,
@@ -139,7 +143,9 @@ def _stage2_loss(
     kl_loss = 0.5 * jnp.mean(mean**2 + var - 1.0 - logvar)
 
     loss = (
-        cfg.feat_coeff * feat_loss + cfg.recon_coeff * recon_loss + cfg.kl_coeff * kl_loss
+        cfg.feat_coeff * feat_loss
+        + cfg.recon_coeff * recon_loss
+        + cfg.kl_coeff * kl_loss
     )
     return loss, {"feat_loss": feat_loss, "recon_loss": recon_loss, "kl_loss": kl_loss}
 

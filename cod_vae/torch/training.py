@@ -205,9 +205,7 @@ def train(
         )
 
     sampler = (
-        DistributedSampler(dataset, seed=train_config.seed)
-        if distributed
-        else None
+        DistributedSampler(dataset, seed=train_config.seed) if distributed else None
     )
     loader = DataLoader(
         dataset,

@@ -21,7 +21,12 @@ import trimesh
 
 from ..mesh import normalize_to_cube, sample_surface_points
 
-__all__ = ["compute_occupancy_data", "axis_scaling", "MeshOccupancyDataset", "iterate_batches"]
+__all__ = [
+    "compute_occupancy_data",
+    "axis_scaling",
+    "MeshOccupancyDataset",
+    "iterate_batches",
+]
 
 
 def compute_occupancy_data(
@@ -40,12 +45,19 @@ def compute_occupancy_data(
     """
     normalized, _ = normalize_to_cube(mesh, object_scale)
     rng = np.random.default_rng(seed)
-    surface = sample_surface_points(normalized, num_surface, seed=int(rng.integers(2**31)))
+    surface = sample_surface_points(
+        normalized, num_surface, seed=int(rng.integers(2**31))
+    )
     vol_points = rng.uniform(-1.0, 1.0, (num_vol, 3)).astype(np.float32)
-    near_base = sample_surface_points(normalized, num_near, seed=int(rng.integers(2**31)))
+    near_base = sample_surface_points(
+        normalized, num_near, seed=int(rng.integers(2**31))
+    )
     stddevs = np.asarray(near_stddevs, dtype=np.float32)
     per_point_std = stddevs[np.arange(num_near) % len(stddevs), None]
-    near_points = near_base + rng.standard_normal((num_near, 3)).astype(np.float32) * per_point_std
+    near_points = (
+        near_base
+        + rng.standard_normal((num_near, 3)).astype(np.float32) * per_point_std
+    )
     near_points = np.clip(near_points, -1.0, 1.0)
     if not normalized.is_watertight:
         raise ValueError(
@@ -80,7 +92,9 @@ def axis_scaling(
     surface = surface * scale
     queries = queries * scale
     if jitter:
-        surface = surface + 0.005 * rng.standard_normal(surface.shape).astype(np.float32)
+        surface = surface + 0.005 * rng.standard_normal(surface.shape).astype(
+            np.float32
+        )
         surface = np.clip(surface, -1.0, 1.0)
     return surface, queries
 
@@ -104,7 +118,11 @@ class MeshOccupancyDataset:
 
     def __init__(
         self,
-        meshes: Sequence[trimesh.Trimesh] | Sequence[Path | str] | Callable[[int], trimesh.Trimesh],
+        meshes: (
+            Sequence[trimesh.Trimesh]
+            | Sequence[Path | str]
+            | Callable[[int], trimesh.Trimesh]
+        ),
         num_meshes: int | None = None,
         pc_size: int = 2048,
         num_vol_queries: int = 4096,
@@ -225,6 +243,4 @@ def iterate_batches(
         if len(indices) < batch_size:
             break
         items = [dataset[int(i)] for i in indices]
-        yield {
-            key: np.stack([item[key] for item in items]) for key in items[0]
-        }
+        yield {key: np.stack([item[key] for item in items]) for key in items[0]}

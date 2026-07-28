@@ -21,7 +21,14 @@ from torch.nn import functional as F
 from ..base import CODVAEBase
 from ..checkpoint import Params
 from ..config import CODVAEConfig
-from .modules import CrossAttention, CrossAttnBlock, GEGLU, GEGLUFFN, PointEmbed, SelfAttnBlock
+from .modules import (
+    CrossAttention,
+    CrossAttnBlock,
+    GEGLU,
+    GEGLUFFN,
+    PointEmbed,
+    SelfAttnBlock,
+)
 
 __all__ = ["CODVAETorch", "CODVAEModule", "farthest_point_sampling"]
 
@@ -117,7 +124,9 @@ class _InitTransformer(nn.Module):
         self.ln_source = nn.LayerNorm(dim)
         self.transformer = nn.ModuleList(
             CrossAttnBlock(
-                dim, config.num_heads, config.decoder_mlp_ratio,
+                dim,
+                config.num_heads,
+                config.decoder_mlp_ratio,
                 droppath=config.droppath_rate,
             )
             for _ in range(config.decoder_num_init_layers)
@@ -142,7 +151,9 @@ class _RefineTransformer(nn.Module):
         self.ln_pre = nn.LayerNorm(dim)
         self.transformer = nn.ModuleList(
             SelfAttnBlock(
-                dim, config.num_heads, config.decoder_mlp_ratio,
+                dim,
+                config.num_heads,
+                config.decoder_mlp_ratio,
                 droppath=config.droppath_rate,
             )
             for _ in range(config.decoder_num_layers)
@@ -232,14 +243,25 @@ class _Decoder(nn.Module):
 
     def patches_to_planes(self, patches: torch.Tensor) -> torch.Tensor:
         config = self.config
-        resolution, patch_size = config.plane_resolution, config.decoder_output_patch_size
+        resolution, patch_size = (
+            config.plane_resolution,
+            config.decoder_output_patch_size,
+        )
         patches = patches.view(
-            patches.shape[0], 3, resolution, resolution, patch_size, patch_size,
+            patches.shape[0],
+            3,
+            resolution,
+            resolution,
+            patch_size,
+            patch_size,
             config.query_dim,
         )
         return patches.permute(0, 1, 6, 2, 4, 3, 5).reshape(
-            patches.shape[0], 3, config.query_dim,
-            config.decoder_output_resolution, config.decoder_output_resolution,
+            patches.shape[0],
+            3,
+            config.query_dim,
+            config.decoder_output_resolution,
+            config.decoder_output_resolution,
         )
 
 
@@ -252,10 +274,17 @@ def _sample_planes(
     for axis in range(3):
         other = [j for j in range(3) if j != axis]
         grid = queries[..., other].unsqueeze(2)
-        features = F.grid_sample(
-            planes[:, axis], grid, mode="bilinear", padding_mode="zeros",
-            align_corners=False,
-        ).squeeze(-1).transpose(1, 2)
+        features = (
+            F.grid_sample(
+                planes[:, axis],
+                grid,
+                mode="bilinear",
+                padding_mode="zeros",
+                align_corners=False,
+            )
+            .squeeze(-1)
+            .transpose(1, 2)
+        )
         if result is None:
             result = features
         else:
@@ -310,7 +339,9 @@ class CODVAEModule(nn.Module):
         """Decode latents (B, L, latent_dim) into triplanes (B, 3, C, R, R)."""
         return self.decode_embed(self.decode_latents(latent))[0]
 
-    def decode_logits(self, planes: torch.Tensor, queries: torch.Tensor) -> torch.Tensor:
+    def decode_logits(
+        self, planes: torch.Tensor, queries: torch.Tensor
+    ) -> torch.Tensor:
         """Occupancy logits (B, N) at query points (B, N, 3) in [-1, 1]^3."""
         features = _sample_planes(planes, queries, mode="sum")
         return self.autoencoder.head(features).squeeze(-1)
@@ -349,7 +380,9 @@ class _LatentDecoder(nn.Module):
         dim = config.embed_dim
         self.transformer = nn.ModuleList(
             SelfAttnBlock(
-                dim, config.num_heads, config.latent_mlp_ratio,
+                dim,
+                config.num_heads,
+                config.latent_mlp_ratio,
                 droppath=config.droppath_rate,
             )
             for _ in range(config.num_latent_layers)
@@ -367,9 +400,7 @@ class CODVAETorch(CODVAEBase):
 
     backend = "torch"
 
-    def __init__(
-        self, config: CODVAEConfig, params: Params, device: str | None = None
-    ):
+    def __init__(self, config: CODVAEConfig, params: Params, device: str | None = None):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
@@ -403,6 +434,4 @@ class CODVAETorch(CODVAEBase):
 
     @torch.no_grad()
     def _decode_logits(self, planes, queries):
-        return (
-            self.module.decode_logits(planes, self._to_device(queries)).cpu().numpy()
-        )
+        return self.module.decode_logits(planes, self._to_device(queries)).cpu().numpy()

@@ -52,19 +52,26 @@ def train_main(argv: list[str] | None = None) -> None:
     parser.add_argument("out_dir", type=Path, help="output directory for checkpoints")
     parser.add_argument("--stage", type=int, choices=(1, 2), default=1)
     parser.add_argument(
-        "--backend", choices=("torch", "jax"), default="torch",
+        "--backend",
+        choices=("torch", "jax"),
+        default="torch",
         help="training backend (default: torch)",
     )
     parser.add_argument(
-        "--init-from", type=Path,
+        "--init-from",
+        type=Path,
         help="npz checkpoint to initialize from (required for stage 2: the trained "
         "stage-1 autoencoder)",
     )
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=32, help="batch size per device")
+    parser.add_argument(
+        "--batch-size", type=int, default=32, help="batch size per device"
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--repeat", type=int, default=16, help="dataset repeat factor per epoch")
+    parser.add_argument(
+        "--repeat", type=int, default=16, help="dataset repeat factor per epoch"
+    )
     parser.add_argument("--num-latents", type=int, default=32)
     parser.add_argument(
         "--cache-dir", type=Path, help="cache directory for precomputed occupancy pools"
@@ -79,7 +86,9 @@ def train_main(argv: list[str] | None = None) -> None:
     from .training import MeshOccupancyDataset, TrainingConfig
 
     mesh_files = sorted(
-        path for path in args.mesh_dir.rglob("*") if path.suffix.lower() in MESH_SUFFIXES
+        path
+        for path in args.mesh_dir.rglob("*")
+        if path.suffix.lower() in MESH_SUFFIXES
     )
     if not mesh_files:
         print(f"No mesh files found in {args.mesh_dir}", file=sys.stderr)
@@ -110,7 +119,11 @@ def train_main(argv: list[str] | None = None) -> None:
         from .torch.training import train
 
         train(
-            config, train_config, dataset, params=params, out_dir=args.out_dir,
+            config,
+            train_config,
+            dataset,
+            params=params,
+            out_dir=args.out_dir,
             num_workers=args.num_workers,
         )
     else:

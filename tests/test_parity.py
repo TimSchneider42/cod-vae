@@ -69,7 +69,9 @@ def test_unbatched_matches_batched(models, point_batch):
 def _loss_batch(num_vol=64, num_near=64, batch_size=2, num_points=256):
     rng = np.random.default_rng(2)
     return {
-        "surface": rng.uniform(-0.9, 0.9, (batch_size, num_points, 3)).astype(np.float32),
+        "surface": rng.uniform(-0.9, 0.9, (batch_size, num_points, 3)).astype(
+            np.float32
+        ),
         "queries": rng.uniform(-1, 1, (batch_size, num_vol + num_near, 3)).astype(
             np.float32
         ),
@@ -89,7 +91,9 @@ def test_stage1_loss_parity(tiny_deterministic_config, tiny_params):
     train_config = TrainingConfig(stage=1)
 
     module = CODVAEModule(tiny_deterministic_config)
-    module.load_state_dict({k: torch.from_numpy(v.copy()) for k, v in tiny_params.items()})
+    module.load_state_dict(
+        {k: torch.from_numpy(v.copy()) for k, v in tiny_params.items()}
+    )
     module.eval()
     loss_module = _LossModule(module, train_config, num_vol)
     with torch.no_grad():
@@ -126,11 +130,15 @@ def test_stage2_loss_parity(tiny_deterministic_config, tiny_params, monkeypatch)
     # Zero the posterior noise in both backends so the losses are deterministic.
     monkeypatch.setattr(torch, "randn_like", lambda x: torch.zeros_like(x))
     monkeypatch.setattr(
-        jax.random, "normal", lambda key, shape, dtype=None: jax.numpy.zeros(shape, dtype)
+        jax.random,
+        "normal",
+        lambda key, shape, dtype=None: jax.numpy.zeros(shape, dtype),
     )
 
     module = CODVAEModule(tiny_deterministic_config)
-    module.load_state_dict({k: torch.from_numpy(v.copy()) for k, v in tiny_params.items()})
+    module.load_state_dict(
+        {k: torch.from_numpy(v.copy()) for k, v in tiny_params.items()}
+    )
     module.eval()
     loss_module = _LossModule(module, train_config, num_vol)
     with torch.no_grad():

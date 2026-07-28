@@ -67,9 +67,7 @@ class DropPath:
             return x
         self.key, subkey = jax.random.split(self.key)
         keep = 1.0 - self.rate
-        mask = jax.random.bernoulli(
-            subkey, keep, (x.shape[0],) + (1,) * (x.ndim - 1)
-        )
+        mask = jax.random.bernoulli(subkey, keep, (x.shape[0],) + (1,) * (x.ndim - 1))
         return x * mask / keep
 
 
@@ -244,7 +242,9 @@ def encode_embed(
             patches = _self_attn_block(
                 params, f"{name}.processing_layers.{layer}", num_heads, patches, dp
             )
-        z = _cross_attn_block(params, f"{name}.patch2latents", num_heads, z, patches, dp)
+        z = _cross_attn_block(
+            params, f"{name}.patch2latents", num_heads, z, patches, dp
+        )
         point_features = point_features + _cross_attn(
             params, f"{name}.latents2points", num_heads, point_features, z
         )
@@ -442,8 +442,14 @@ def _grid_sample_plane(plane: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
     x = ((coords[:, 0] + 1.0) * width - 1.0) / 2.0
     y = ((coords[:, 1] + 1.0) * height - 1.0) / 2.0
     x0, y0 = jnp.floor(x), jnp.floor(y)
-    weights_x = [(x0.astype(jnp.int32), 1.0 - (x - x0)), (x0.astype(jnp.int32) + 1, x - x0)]
-    weights_y = [(y0.astype(jnp.int32), 1.0 - (y - y0)), (y0.astype(jnp.int32) + 1, y - y0)]
+    weights_x = [
+        (x0.astype(jnp.int32), 1.0 - (x - x0)),
+        (x0.astype(jnp.int32) + 1, x - x0),
+    ]
+    weights_y = [
+        (y0.astype(jnp.int32), 1.0 - (y - y0)),
+        (y0.astype(jnp.int32) + 1, y - y0),
+    ]
     result = jnp.zeros((coords.shape[0], channels), dtype=plane.dtype)
     for xi, wx in weights_x:
         for yi, wy in weights_y:
@@ -498,9 +504,7 @@ class CODVAEJax(CODVAEBase):
 
     backend = "jax"
 
-    def __init__(
-        self, config: CODVAEConfig, params: Params, device=None
-    ):
+    def __init__(self, config: CODVAEConfig, params: Params, device=None):
         if isinstance(device, str):
             device = jax.devices(device)[0]
         self.device = device if device is not None else jax.devices()[0]

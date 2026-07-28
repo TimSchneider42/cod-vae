@@ -15,7 +15,13 @@ import numpy as np
 from .checkpoint import Params
 from .config import CODVAEConfig
 
-__all__ = ["init_params", "point_embed_basis", "parameter_names", "AUTOENCODER_PREFIX", "LATENT_PREFIXES"]
+__all__ = [
+    "init_params",
+    "point_embed_basis",
+    "parameter_names",
+    "AUTOENCODER_PREFIX",
+    "LATENT_PREFIXES",
+]
 
 # Parameters belonging to the stage-1 autoencoder vs. the stage-2 latent VAE modules.
 AUTOENCODER_PREFIX = "autoencoder."
@@ -66,9 +72,7 @@ class _Init:
 
     def embedding(self, name: str, *shape: int) -> None:
         scale = self.config.embed_dim**-0.5
-        self.params[name] = (
-            self.rng.standard_normal(shape).astype(np.float32) * scale
-        )
+        self.params[name] = self.rng.standard_normal(shape).astype(np.float32) * scale
 
     def geglu_ffn(self, name: str, mlp_ratio: float) -> None:
         dim = self.config.embed_dim
@@ -106,9 +110,7 @@ def init_params(config: CODVAEConfig, seed: int = 0) -> Params:
     init.params["autoencoder.point_embed.basis"] = point_embed_basis(
         config.point_embed_hidden_dim
     )
-    init.linear(
-        "autoencoder.point_embed.mlp", dim, config.point_embed_hidden_dim + 3
-    )
+    init.linear("autoencoder.point_embed.mlp", dim, config.point_embed_hidden_dim + 3)
     init.layer_norm("autoencoder.norm_latent")
 
     ## encoder

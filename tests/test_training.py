@@ -83,15 +83,30 @@ def test_stage1_loss_decreases(backend, dataset):
     """A tiny model on a tiny dataset: the stage-1 loss must clearly decrease."""
     pytest.importorskip(backend)
     config = CODVAEConfig(
-        latent_dim=8, num_latents=8, embed_dim=64, query_dim=8, num_heads=4,
-        num_latent_layers=1, encoder_num_patches=32, encoder_num_blocks=1,
-        encoder_num_layers_per_block=1, decoder_output_resolution=32,
-        decoder_output_patch_size=8, decoder_num_layers=1, decoder_num_init_layers=1,
-        decoder_num_merged_tokens=4, droppath_rate=0.0,
+        latent_dim=8,
+        num_latents=8,
+        embed_dim=64,
+        query_dim=8,
+        num_heads=4,
+        num_latent_layers=1,
+        encoder_num_patches=32,
+        encoder_num_blocks=1,
+        encoder_num_layers_per_block=1,
+        decoder_output_resolution=32,
+        decoder_output_patch_size=8,
+        decoder_num_layers=1,
+        decoder_num_init_layers=1,
+        decoder_num_merged_tokens=4,
+        droppath_rate=0.0,
     )
     train_config = TrainingConfig(
-        stage=1, epochs=10, batch_size=4, lr=1e-3, base_batch_size=4,
-        log_every=1000, seed=0,
+        stage=1,
+        epochs=10,
+        batch_size=4,
+        lr=1e-3,
+        base_batch_size=4,
+        log_every=1000,
+        seed=0,
     )
     from cod_vae import CODVAE, init_params
     from cod_vae.training.data import iterate_batches
@@ -154,10 +169,16 @@ def test_torch_ddp_cpu(tiny_config, dataset, tmp_path):
     )
     result = subprocess.run(
         [
-            sys.executable, "-m", "torch.distributed.run",
-            "--nproc_per_node=2", "--master_port=29517", str(script),
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node=2",
+            "--master_port=29517",
+            str(script),
         ],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True,
+        text=True,
+        timeout=600,
         env={**os.environ, "OMP_NUM_THREADS": "1"},
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -198,7 +219,9 @@ def test_jax_multi_device_cpu(tmp_path):
     )
     result = subprocess.run(
         [sys.executable, str(script)],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True,
+        text=True,
+        timeout=600,
         env={
             **os.environ,
             "JAX_PLATFORMS": "cpu",

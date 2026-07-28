@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=64", "setuptools_scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cod-vae"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Unofficial PyTorch/JAX reimplementation of COD-VAE, a 3D shape VAE with compact 1D latents (Cho et al., ICCV 2025)."
 readme = "README.md"
 authors = [
@@ -37,3 +37,10 @@ cod-vae-train = "cod_vae.cli:train_main"
 
 [tool.setuptools.packages.find]
 include = ["cod_vae*"]
+
+[tool.setuptools_scm]
+# Version is inferred from the latest "v*" git tag; between tags this yields
+# development versions like 0.1.1.dev3+g1a2b3c4 (tagged builds are plain X.Y.Z).
+version_file = "cod_vae/_version.py"
+fallback_version = "0.0.0"
+version_scheme = "guess-next-dev"

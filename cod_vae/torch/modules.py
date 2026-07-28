@@ -64,7 +64,8 @@ class PointEmbed(nn.Module):
     def __init__(self, embed_dim: int, hidden_dim: int = 48):
         super().__init__()
         self.register_buffer(
-            "basis", torch.from_numpy(np.ascontiguousarray(point_embed_basis(hidden_dim)))
+            "basis",
+            torch.from_numpy(np.ascontiguousarray(point_embed_basis(hidden_dim))),
         )
         self.mlp = nn.Linear(hidden_dim + 3, embed_dim)
 

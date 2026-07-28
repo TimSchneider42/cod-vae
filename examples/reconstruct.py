@@ -23,7 +23,8 @@ def main() -> None:
     parser.add_argument("input_mesh", type=Path)
     parser.add_argument("output_mesh", type=Path)
     parser.add_argument(
-        "--model", required=True,
+        "--model",
+        required=True,
         help="Hugging Face repo id, npz file, or official release directory",
     )
     parser.add_argument("--backend", choices=("auto", "torch", "jax"), default="auto")

@@ -18,6 +18,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+try:
+    from ._version import version as __version__
+except ImportError:  # not installed / no build metadata available
+    try:
+        from importlib.metadata import version as _package_version
+
+        __version__ = _package_version("cod-vae")
+    except Exception:
+        __version__ = "0.0.0"
+
 from .base import CODVAEBase
 from .checkpoint import Params, load_npz, load_torch_release, save_npz
 from .config import CODVAEConfig

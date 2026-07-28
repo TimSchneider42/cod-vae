@@ -29,10 +29,18 @@ def main() -> None:
     args = parser.parse_args()
 
     config = CODVAEConfig(
-        latent_dim=16, num_latents=16, embed_dim=128, query_dim=16,
-        num_latent_layers=4, encoder_num_patches=128, encoder_num_blocks=2,
-        encoder_num_layers_per_block=2, decoder_output_resolution=64,
-        decoder_output_patch_size=8, decoder_num_layers=4, decoder_num_init_layers=1,
+        latent_dim=16,
+        num_latents=16,
+        embed_dim=128,
+        query_dim=16,
+        num_latent_layers=4,
+        encoder_num_patches=128,
+        encoder_num_blocks=2,
+        encoder_num_layers_per_block=2,
+        decoder_output_resolution=64,
+        decoder_output_patch_size=8,
+        decoder_num_layers=4,
+        decoder_num_init_layers=1,
         decoder_num_merged_tokens=8,
     )
     meshes = [
@@ -42,8 +50,14 @@ def main() -> None:
         trimesh.creation.capsule(radius=0.25, height=0.7),
     ]
     dataset = MeshOccupancyDataset(
-        meshes, pc_size=1024, num_vol_queries=1024, num_near_queries=1024,
-        num_surface=50_000, num_vol=50_000, num_near=50_000, repeat=16,
+        meshes,
+        pc_size=1024,
+        num_vol_queries=1024,
+        num_near_queries=1024,
+        num_surface=50_000,
+        num_vol=50_000,
+        num_near=50_000,
+        repeat=16,
     )
     print("Precomputing occupancy pools...")
     dataset.precompute(verbose=True)
@@ -55,20 +69,32 @@ def main() -> None:
 
     print("=== Stage 1: autoencoder ===")
     stage1 = TrainingConfig(
-        stage=1, epochs=args.epochs, batch_size=8, lr=1e-3, base_batch_size=8,
+        stage=1,
+        epochs=args.epochs,
+        batch_size=8,
+        lr=1e-3,
+        base_batch_size=8,
         log_every=20,
     )
     params = train(config, stage1, dataset, out_dir=args.out_dir / "stage1")
 
     print("=== Stage 2: latent VAE ===")
     stage2 = TrainingConfig(
-        stage=2, epochs=args.epochs, batch_size=8, lr=1e-3, base_batch_size=8,
+        stage=2,
+        epochs=args.epochs,
+        batch_size=8,
+        lr=1e-3,
+        base_batch_size=8,
         log_every=20,
     )
-    params = train(config, stage2, dataset, params=params, out_dir=args.out_dir / "stage2")
+    params = train(
+        config, stage2, dataset, params=params, out_dir=args.out_dir / "stage2"
+    )
 
     vae = CODVAE(config, params, backend=args.backend)
-    latent, transform = vae.encode_mesh(meshes[0], num_points=1024, return_transform=True)
+    latent, transform = vae.encode_mesh(
+        meshes[0], num_points=1024, return_transform=True
+    )
     reconstruction = vae.decode_mesh(latent, resolution=64, transform=transform)
     output = args.out_dir / "reconstruction.obj"
     reconstruction.export(output)

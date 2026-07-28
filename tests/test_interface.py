@@ -17,7 +17,9 @@ def test_factory_returns_backend(model):
 
 
 def test_encode_decode_mesh(model, meshes):
-    latent, transform = model.encode_mesh(meshes[0], num_points=256, seed=0, return_transform=True)
+    latent, transform = model.encode_mesh(
+        meshes[0], num_points=256, seed=0, return_transform=True
+    )
     assert latent.shape == (model.config.num_latents, model.config.latent_dim)
     reconstruction = model.decode_mesh(latent, resolution=16, transform=transform)
     assert isinstance(reconstruction, trimesh.Trimesh)
@@ -28,7 +30,9 @@ def test_encode_decode_mesh_batched(model, meshes):
         meshes, num_points=256, seed=0, return_transform=True
     )
     assert latents.shape == (
-        len(meshes), model.config.num_latents, model.config.latent_dim,
+        len(meshes),
+        model.config.num_latents,
+        model.config.latent_dim,
     )
     reconstructions = model.decode_mesh(latents, resolution=16, transform=transforms)
     assert isinstance(reconstructions, list) and len(reconstructions) == len(meshes)

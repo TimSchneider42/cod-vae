@@ -106,9 +106,7 @@ class CODVAEBase(ABC):
             resolution = self.config.decoder_output_resolution
         latents = np.asarray(latents, dtype=np.float32)
         batched = latents.ndim == 3
-        logits = self.decode(
-            latents, grid_queries(resolution), chunk_size=chunk_size
-        )
+        logits = self.decode(latents, grid_queries(resolution), chunk_size=chunk_size)
         shape = (resolution,) * 3
         return logits.reshape((-1, *shape) if batched else shape)
 
