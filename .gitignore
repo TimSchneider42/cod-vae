@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+/venv/
+/.venv/
+
+# Editors
+.idea/
+.vscode/
+
+# Model weights and training outputs
+*.npz
+!tests/data/*.npz
+/checkpoints/
+/logs/
+
+# Caches
+.pytest_cache/
+.cache/
