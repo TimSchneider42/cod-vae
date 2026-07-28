@@ -93,6 +93,8 @@ A command line interface is available as well:
 cod-vae-train path/to/meshes checkpoints --stage 1 --backend torch
 ```
 
+To replicate the original models' training on ShapeNet (using the preprocessed dataset of 3DShape2VecSet via `cod_vae.training.ShapeNetVecSetDataset`), see [TRAINING.md](TRAINING.md).
+
 ### Multi-GPU training
 
 - **PyTorch**: standard DistributedDataParallel; launch with `torchrun`, e.g. `torchrun --nproc_per_node=4 -m cod_vae.cli train path/to/meshes checkpoints --stage 1`.

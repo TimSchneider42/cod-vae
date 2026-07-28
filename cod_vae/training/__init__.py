@@ -11,9 +11,11 @@ from .data import (
     compute_occupancy_data,
     iterate_batches,
 )
+from .vecset import ShapeNetVecSetDataset
 
 __all__ = [
     "MeshOccupancyDataset",
+    "ShapeNetVecSetDataset",
     "TrainingConfig",
     "axis_scaling",
     "compute_occupancy_data",
