@@ -97,6 +97,7 @@ Checkpoints are self-contained npz files loadable by both backends (and by `CODV
 - `--hf [NAME=]DATASET`: a Hugging Face mesh dataset in the [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) format (rows with `mesh.vertices`/`mesh.faces` columns), given as a Hub repository id or a local path. By default the `train`/`val`(`idation`)/`test` splits are used, as far as present; `--hf-split SRC[=DST]` selects and remaps splits explicitly (e.g. `--hf-split holdout=val`).
 - `--vecset PATH`: an existing preprocessed root as distributed by the 3DShape2VecSet authors, merged as-is (symlinked by default; `--link hardlink|copy` to materialize).
 
+Every source accepts an optional `:FRACTION` suffix (e.g. `--hf TimSchneider42/tactile-mnist-mnist3d:0.1`) to keep only a deterministic random subsample of each split; the selection is controlled by `--seed` (default 0), so the same command always yields the same subset.
 Preprocessing is resumable (existing outputs are skipped unless `--overwrite` is given) and parallelizes with `--workers`.
 
 ```bash

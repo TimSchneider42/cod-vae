@@ -209,6 +209,84 @@ def test_mesh_dir_source(tmp_path):
         add_mesh_dir_source(tmp_path / "other", "toy2", mesh_dir)
 
 
+def test_subsampling(tmp_path, hf_dataset_dir, vecset_source_dir):
+    from cod_vae.cli import dataset_main
+    from cod_vae.training.preprocess import _subsample
+
+    # Deterministic given (seed, key), independent of list processing order.
+    items = list(range(100))
+    assert _subsample(items, 0.1, seed=0, key="a") == _subsample(
+        items, 0.1, seed=0, key="a"
+    )
+    assert len(_subsample(items, 0.1, seed=0, key="a")) == 10
+    assert _subsample(items, 0.1, seed=0, key="a") != _subsample(
+        items, 0.1, seed=1, key="a"
+    )
+    assert _subsample(items, 1.0, seed=0, key="a") == items
+    assert _subsample(items, 0.001, seed=0, key="a")  # at least one item survives
+    with pytest.raises(ValueError, match="fraction"):
+        _subsample(items, 0.0, seed=0, key="a")
+
+    # Vecset roots: subsampled categories are real directories with rewritten .lst
+    # files and per-object links; a mesh dir with :0.5 keeps one of two train meshes,
+    # with the object id of its position in the full file list.
+    mesh_dir = tmp_path / "meshes"
+    mesh_dir.mkdir()
+    trimesh.creation.box(extents=[1.0, 0.6, 0.4]).export(mesh_dir / "box.stl")
+    trimesh.creation.icosphere(subdivisions=2).export(mesh_dir / "sphere.stl")
+    out = tmp_path / "merged"
+    dataset_main(
+        [
+            str(out),
+            "--vecset",
+            f"{vecset_source_dir}:0.5",
+            "--meshes",
+            f"toy={mesh_dir}:0.5",
+            "--hf",
+            f"toyhf={hf_dataset_dir}:0.5",
+            "--num-vol",
+            "2000",
+            "--num-surface",
+            "1000",
+            "--watertight-resolution",
+            "1000",
+        ]
+    )
+    vecset_cat = out / "ShapeNetV2_point" / "02691156"
+    assert vecset_cat.is_dir() and not vecset_cat.is_symlink()
+    assert (vecset_cat / "train.lst").read_text().split() == ["obj0"]
+    assert (vecset_cat / "obj0.npz").exists()
+    toy_train = (out / "ShapeNetV2_point" / "toy" / "train.lst").read_text().split()
+    assert len(toy_train) == 1 and toy_train[0] in ("train_000000", "train_000001")
+    toyhf_train = (out / "ShapeNetV2_point" / "toyhf" / "train.lst").read_text().split()
+    assert len(toyhf_train) == 1
+
+    # The same command with the same seed selects the same subsets.
+    out2 = tmp_path / "merged2"
+    dataset_main(
+        [
+            str(out2),
+            "--meshes",
+            f"toy={mesh_dir}:0.5",
+            "--num-vol",
+            "2000",
+            "--num-surface",
+            "1000",
+            "--watertight-resolution",
+            "1000",
+        ]
+    )
+    assert (
+        out2 / "ShapeNetV2_point" / "toy" / "train.lst"
+    ).read_text().split() == toy_train
+
+    dataset = ShapeNetVecSetDataset(
+        out, split="train", pc_size=64, num_vol_queries=64, num_near_queries=64
+    )
+    assert len(dataset) == 3  # one object per category after subsampling
+    assert dataset[0]["labels"].shape == (128,)
+
+
 def test_dataset_cli_with_split_map_and_workers(tmp_path, hf_dataset_dir):
     from cod_vae.cli import dataset_main
 

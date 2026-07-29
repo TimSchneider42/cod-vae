@@ -175,30 +175,33 @@ def dataset_main(argv: list[str] | None = None) -> None:
         "--meshes",
         action="append",
         default=[],
-        metavar="[NAME=]DIR",
+        metavar="[NAME=]DIR[:FRACTION]",
         help="directory of mesh files (searched recursively; the meshes need not be "
         "watertight); becomes one category directory, named NAME (default: the "
         "directory name). Meshes in train/val/test subdirectories are assigned to "
-        "the corresponding splits, otherwise everything becomes training data. May "
-        "be given multiple times",
+        "the corresponding splits, otherwise everything becomes training data. An "
+        "optional :FRACTION suffix (e.g. dir:0.1) keeps only a deterministic random "
+        "subsample of each split. May be given multiple times",
     )
     parser.add_argument(
         "--vecset",
         action="append",
         default=[],
-        type=Path,
-        metavar="PATH",
+        metavar="PATH[:FRACTION]",
         help="preprocessed 3DShape2VecSet root (ShapeNetV2_point + "
-        "ShapeNetV2_surface) to merge; may be given multiple times",
+        "ShapeNetV2_surface) to merge; an optional :FRACTION suffix keeps only a "
+        "deterministic random subsample of each category's splits. May be given "
+        "multiple times",
     )
     parser.add_argument(
         "--hf",
         action="append",
         default=[],
-        metavar="[NAME=]DATASET",
+        metavar="[NAME=]DATASET[:FRACTION]",
         help="Hugging Face mesh dataset in the Tactile MNIST format (Hub repository "
         "id or local path); becomes one category directory, named NAME (default: the "
-        "last path component). May be given multiple times",
+        "last path component). An optional :FRACTION suffix keeps only a "
+        "deterministic random subsample of each split. May be given multiple times",
     )
     parser.add_argument(
         "--hf-split",
@@ -222,7 +225,12 @@ def dataset_main(argv: list[str] | None = None) -> None:
         help="preprocess meshes in this many parallel processes (default: 0, "
         "in-process)",
     )
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="seed for mesh preprocessing and subsampling (default: 0)",
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -255,16 +263,35 @@ def dataset_main(argv: list[str] | None = None) -> None:
     if not args.meshes and not args.vecset and not args.hf:
         parser.error("at least one source (--meshes, --vecset, or --hf) is required")
 
-    def parse_source(spec: str) -> tuple[str, str]:
+    def split_fraction(spec: str) -> tuple[str, float]:
+        head, sep, tail = spec.rpartition(":")
+        if sep:
+            try:
+                fraction = float(tail)
+            except ValueError:
+                pass
+            else:
+                if not 0 < fraction <= 1:
+                    parser.error(
+                        f"subsampling fraction must be in (0, 1], got {spec!r}"
+                    )
+                return head, fraction
+        return spec, 1.0
+
+    def parse_source(spec: str) -> tuple[str, str, float]:
         if "=" in spec:
             name, source = spec.split("=", 1)
         else:
+            name = None
             source = spec
-            name = Path(spec.rstrip("/")).name
-        return name, source
+        source, fraction = split_fraction(source)
+        if name is None:
+            name = Path(source.rstrip("/")).name
+        return name, source, fraction
 
     mesh_sources = [parse_source(spec) for spec in args.meshes]
     hf_sources = [parse_source(spec) for spec in args.hf]
+    vecset_sources = [split_fraction(spec) for spec in args.vecset]
     split_map = None
     if args.hf_split:
         split_map = {}
@@ -280,7 +307,7 @@ def dataset_main(argv: list[str] | None = None) -> None:
     )
     build_vecset_dataset(
         args.out_dir,
-        vecset_sources=args.vecset,
+        vecset_sources=vecset_sources,
         mesh_sources=mesh_sources,
         hf_sources=hf_sources,
         link=args.link,

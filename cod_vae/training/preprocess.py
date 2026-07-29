@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import zlib
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,40 +168,124 @@ def write_vecset_object(
     np.savez(surface_dir / f"{object_id}.npz", points=data["surface"])
 
 
+def _subsample(items: Sequence, fraction: float, seed: int, key: str) -> list:
+    """
+    Deterministically keep round(fraction * len) items (at least one), preserving
+    order. The selection depends only on (seed, key), not on the processing order.
+    """
+    if not 0 < fraction <= 1:
+        raise ValueError(f"Subsampling fraction must be in (0, 1], got {fraction}")
+    if fraction == 1 or not items:
+        return list(items)
+    count = max(1, round(len(items) * fraction))
+    rng = np.random.default_rng([seed, zlib.crc32(key.encode())])
+    keep = np.sort(rng.choice(len(items), size=count, replace=False))
+    return [items[int(i)] for i in keep]
+
+
+def _object_seed(seed: int, split: str, index: int) -> int:
+    """Stable per-object preprocessing seed, independent of subsampling."""
+    entropy = [seed, zlib.crc32(split.encode()), index]
+    return int(np.random.SeedSequence(entropy).generate_state(1)[0])
+
+
+def _link_file(src: Path, dst: Path, link: str) -> None:
+    if not src.exists():
+        raise FileNotFoundError(f"{src} is missing")
+    if link == "symlink":
+        dst.symlink_to(src.resolve())
+    elif link == "hardlink":
+        os.link(src, dst)
+    else:
+        shutil.copy2(src, dst)
+
+
 def merge_vecset_root(
-    src_root: Path | str, out_root: Path | str, link: str = "symlink"
+    src_root: Path | str,
+    out_root: Path | str,
+    link: str = "symlink",
+    fraction: float = 1.0,
+    seed: int = 0,
 ) -> list[str]:
     """
     Merge an existing preprocessed root (ShapeNetV2_point + ShapeNetV2_surface) into
     the output root by symlinking, hardlinking, or copying every category directory.
-    Returns the merged category names; raises FileExistsError on name collisions.
+    With ``fraction < 1``, a deterministic random subsample of each category's splits
+    is kept instead: the .lst files are rewritten and only the sampled objects' files
+    are linked. Returns the merged category names; raises FileExistsError on name
+    collisions.
     """
     if link not in ("symlink", "hardlink", "copy"):
         raise ValueError(f"Unknown link mode {link!r}")
     src_root, out_root = Path(src_root), Path(out_root)
-    categories: list[str] = []
     for sub in (POINT_DIR, SURFACE_DIR):
-        src_sub = src_root / sub
-        if not src_sub.is_dir():
+        if not (src_root / sub).is_dir():
             raise FileNotFoundError(
-                f"{src_root} is not a preprocessed vecset root: {src_sub} is missing"
+                f"{src_root} is not a preprocessed vecset root: "
+                f"{src_root / sub} is missing"
             )
-        for src_cat in sorted(p for p in src_sub.iterdir() if p.is_dir()):
-            dst = out_root / sub / src_cat.name
+
+    if fraction >= 1.0:
+        categories: list[str] = []
+        for sub in (POINT_DIR, SURFACE_DIR):
+            for src_cat in sorted(p for p in (src_root / sub).iterdir() if p.is_dir()):
+                dst = out_root / sub / src_cat.name
+                if dst.exists() or dst.is_symlink():
+                    raise FileExistsError(
+                        f"{dst} already exists; category names must be unique across "
+                        f"sources"
+                    )
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if link == "symlink":
+                    dst.symlink_to(src_cat.resolve(), target_is_directory=True)
+                elif link == "hardlink":
+                    shutil.copytree(src_cat, dst, copy_function=os.link)
+                else:
+                    shutil.copytree(src_cat, dst)
+                if sub == POINT_DIR:
+                    categories.append(src_cat.name)
+        return categories
+
+    categories = []
+    for src_cat in sorted(p for p in (src_root / POINT_DIR).iterdir() if p.is_dir()):
+        category = src_cat.name
+        dst_point = out_root / POINT_DIR / category
+        dst_surface_cat = out_root / SURFACE_DIR / category
+        for dst in (dst_point, dst_surface_cat):
             if dst.exists() or dst.is_symlink():
                 raise FileExistsError(
                     f"{dst} already exists; category names must be unique across "
                     f"sources"
                 )
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            if link == "symlink":
-                dst.symlink_to(src_cat.resolve(), target_is_directory=True)
-            elif link == "hardlink":
-                shutil.copytree(src_cat, dst, copy_function=os.link)
-            else:
-                shutil.copytree(src_cat, dst)
-            if sub == POINT_DIR:
-                categories.append(src_cat.name)
+        src_surface = src_root / SURFACE_DIR / category / "4_pointcloud"
+        dst_surface = dst_surface_cat / "4_pointcloud"
+        dst_point.mkdir(parents=True)
+        dst_surface.mkdir(parents=True)
+        kept_ids: set[str] = set()
+        for split in SPLITS:
+            split_file = src_cat / f"{split}.lst"
+            if not split_file.exists():
+                continue
+            with split_file.open() as f:
+                ids = [line.replace(".npz", "").strip() for line in f if line.strip()]
+            kept = _subsample(ids, fraction, seed, f"{category}/{split}")
+            (dst_point / f"{split}.lst").write_text(
+                "".join(f"{object_id}\n" for object_id in kept)
+            )
+            kept_ids.update(kept)
+        for object_id in sorted(kept_ids):
+            _link_file(
+                src_cat / f"{object_id}.npz", dst_point / f"{object_id}.npz", link
+            )
+            _link_file(
+                src_cat / f"{object_id}.npy", dst_point / f"{object_id}.npy", link
+            )
+            _link_file(
+                src_surface / f"{object_id}.npz",
+                dst_surface / f"{object_id}.npz",
+                link,
+            )
+        categories.append(category)
     return categories
 
 
@@ -363,6 +448,7 @@ def add_mesh_dir_source(
     seed: int = 0,
     workers: int = 0,
     overwrite: bool = False,
+    fraction: float = 1.0,
     verbose: bool = True,
 ) -> dict[str, list[str]]:
     """
@@ -370,10 +456,13 @@ def add_mesh_dir_source(
     :data:`MESH_SUFFIXES`) into a new category directory of the vecset layout. The
     meshes do not need to be watertight. If the directory contains train/val/test
     subdirectories, meshes are assigned to the corresponding splits; otherwise
-    everything becomes training data. Existing outputs are reused (skipped) unless
-    ``overwrite`` is set, so an interrupted run can be resumed as long as the source
-    directory is unchanged. Failed meshes are reported and dropped. Returns the object
-    ids per split, which are also written to the category's .lst files.
+    everything becomes training data. With ``fraction < 1``, only a deterministic
+    random subsample of each split (seeded by ``seed``) is preprocessed; object ids
+    keep their position in the full file list, so a mesh's outputs are identical
+    across fractions. Existing outputs are reused (skipped) unless ``overwrite`` is
+    set, so an interrupted run can be resumed as long as the source directory is
+    unchanged. Failed meshes are reported and dropped. Returns the object ids per
+    split, which are also written to the category's .lst files.
     """
     out_root, mesh_dir = Path(out_root), Path(mesh_dir)
     if settings is None:
@@ -409,13 +498,13 @@ def add_mesh_dir_source(
 
     tasks: list[tuple] = []
     lst: dict[str, list[str]] = {split: [] for split in SPLITS}
-    counter = 0
     for split, paths in files.items():
-        for index, path in enumerate(paths):
+        indexed = _subsample(
+            list(enumerate(paths)), fraction, seed, f"{category}/{split}"
+        )
+        for index, path in indexed:
             object_id = f"{split}_{index:06d}"
             lst[split].append(object_id)
-            object_seed = seed + counter
-            counter += 1
             if _outputs_exist(out_root, category, object_id) and not overwrite:
                 continue
             extras = {"source_file": str(path.relative_to(mesh_dir))}
@@ -426,7 +515,7 @@ def add_mesh_dir_source(
                     object_id,
                     str(path),
                     settings,
-                    object_seed,
+                    _object_seed(seed, split, index),
                     extras,
                 )
             )
@@ -442,15 +531,19 @@ def add_hf_source(
     seed: int = 0,
     workers: int = 0,
     overwrite: bool = False,
+    fraction: float = 1.0,
     verbose: bool = True,
 ) -> dict[str, list[str]]:
     """
     Preprocess a Hugging Face mesh dataset into a new category directory of the vecset
-    layout. Existing outputs are reused (skipped) unless ``overwrite`` is set, so an
-    interrupted run can be resumed. Meshes that fail preprocessing (e.g. watertighting)
-    are reported and dropped, as in the reference script. With ``workers > 0``, meshes
-    are processed in that many parallel processes. Returns the object ids per split,
-    which are also written to the category's train/val/test .lst files.
+    layout. With ``fraction < 1``, only a deterministic random subsample of each
+    source split (seeded by ``seed``) is preprocessed; object ids keep their row index
+    in the full split, so a row's outputs are identical across fractions. Existing
+    outputs are reused (skipped) unless ``overwrite`` is set, so an interrupted run
+    can be resumed. Meshes that fail preprocessing (e.g. watertighting) are reported
+    and dropped, as in the reference script. With ``workers > 0``, meshes are
+    processed in that many parallel processes. Returns the object ids per split, which
+    are also written to the category's train/val/test .lst files.
     """
     out_root = Path(out_root)
     if settings is None:
@@ -461,7 +554,6 @@ def add_hf_source(
 
     tasks: list[tuple] = []
     lst: dict[str, list[str]] = {split: [] for split in SPLITS}
-    counter = 0
     for src_split, ds in split_datasets.items():
         ds = ds.with_format("numpy")
         columns = set(ds.column_names)
@@ -471,11 +563,12 @@ def add_hf_source(
                     f"{dataset}[{src_split}] has no {required!r} column; expected a "
                     f"mesh dataset in the Tactile MNIST format"
                 )
-        for index in range(len(ds)):
+        indices = _subsample(
+            list(range(len(ds))), fraction, seed, f"{category}/{src_split}"
+        )
+        for index in indices:
             object_id = f"{src_split}_{index:06d}"
             lst[resolved_map[src_split]].append(object_id)
-            object_seed = seed + counter
-            counter += 1
             if _outputs_exist(out_root, category, object_id) and not overwrite:
                 continue
             row = ds[index]
@@ -487,7 +580,7 @@ def add_hf_source(
                     object_id,
                     (np.asarray(row["mesh.vertices"]), np.asarray(row["mesh.faces"])),
                     settings,
-                    object_seed,
+                    _object_seed(seed, src_split, index),
                     extras,
                 )
             )
@@ -496,9 +589,9 @@ def add_hf_source(
 
 def build_vecset_dataset(
     out_dir: Path | str,
-    vecset_sources: Sequence[Path | str] = (),
-    mesh_sources: Sequence[tuple[str, Path | str]] = (),
-    hf_sources: Sequence[tuple[str, str]] = (),
+    vecset_sources: Sequence[Path | str | tuple[Path | str, float]] = (),
+    mesh_sources: Sequence[tuple] = (),
+    hf_sources: Sequence[tuple] = (),
     link: str = "symlink",
     split_map: Mapping[str, str] | None = None,
     settings: SdfGenSettings | None = None,
@@ -511,25 +604,42 @@ def build_vecset_dataset(
     Merge preprocessed vecset roots, directories of mesh files, and Hugging Face mesh
     datasets (the latter two given as ``(category_name, source)`` pairs) into a dataset
     at ``out_dir`` in the vecset layout, directly loadable with
-    :class:`cod_vae.training.ShapeNetVecSetDataset`.
+    :class:`cod_vae.training.ShapeNetVecSetDataset`. Every source optionally takes a
+    subsampling fraction — ``(root, fraction)`` for vecset sources,
+    ``(name, source, fraction)`` for the others — to deterministically keep only that
+    share of each split (seeded by ``seed``).
     """
     out_dir = Path(out_dir)
-    names = [name for name, _ in (*mesh_sources, *hf_sources)]
+    vecset_sources = [
+        entry if isinstance(entry, tuple) else (entry, 1.0) for entry in vecset_sources
+    ]
+    mesh_sources = [(e[0], e[1], e[2] if len(e) > 2 else 1.0) for e in mesh_sources]
+    hf_sources = [(e[0], e[1], e[2] if len(e) > 2 else 1.0) for e in hf_sources]
+    names = [name for name, _, _ in (*mesh_sources, *hf_sources)]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
         raise ValueError(f"Duplicate source names: {duplicates}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    for src_root in vecset_sources:
-        categories = merge_vecset_root(src_root, out_dir, link=link)
-        if verbose:
-            print(f"Merged {len(categories)} categories from {src_root} ({link})")
 
-    def report(source, name, lst):
+    def describe(source, fraction):
+        return source if fraction >= 1 else f"{source} (fraction {fraction})"
+
+    for src_root, fraction in vecset_sources:
+        categories = merge_vecset_root(
+            src_root, out_dir, link=link, fraction=fraction, seed=seed
+        )
+        if verbose:
+            print(
+                f"Merged {len(categories)} categories from "
+                f"{describe(src_root, fraction)} ({link})"
+            )
+
+    def report(source, fraction, name, lst):
         if verbose:
             counts = ", ".join(f"{split}: {len(ids)}" for split, ids in lst.items())
-            print(f"Added {source} as category {name!r} ({counts})")
+            print(f"Added {describe(source, fraction)} as category {name!r} ({counts})")
 
-    for name, mesh_dir in mesh_sources:
+    for name, mesh_dir, fraction in mesh_sources:
         lst = add_mesh_dir_source(
             out_dir,
             name,
@@ -538,10 +648,11 @@ def build_vecset_dataset(
             seed=seed,
             workers=workers,
             overwrite=overwrite,
+            fraction=fraction,
             verbose=verbose,
         )
-        report(mesh_dir, name, lst)
-    for name, dataset in hf_sources:
+        report(mesh_dir, fraction, name, lst)
+    for name, dataset, fraction in hf_sources:
         lst = add_hf_source(
             out_dir,
             name,
@@ -551,6 +662,7 @@ def build_vecset_dataset(
             seed=seed,
             workers=workers,
             overwrite=overwrite,
+            fraction=fraction,
             verbose=verbose,
         )
-        report(dataset, name, lst)
+        report(dataset, fraction, name, lst)
