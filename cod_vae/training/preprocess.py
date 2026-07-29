@@ -43,6 +43,7 @@ import numpy as np
 __all__ = [
     "MESH_SUFFIXES",
     "SdfGenSettings",
+    "is_closed_mesh",
     "preprocess_mesh",
     "write_vecset_object",
     "merge_vecset_root",
@@ -85,6 +86,24 @@ class SdfGenSettings:
     near_stddevs: tuple[float, ...] = (0.005, 0.05)
     object_scale: float = 0.9
     watertight_resolution: int = 50_000
+    # Meshes that are already closed need no watertighting: the occupancy of a closed
+    # surface is exact without it, and the step is not a repair but a remesh onto an
+    # octree (it turns 3.5k vertices into 77k and costs seconds per mesh). Off by
+    # default, because it changes the surface sampling for datasets that are already
+    # clean -- and because the reference recipe applies the step unconditionally.
+    skip_watertight_when_closed: bool = False
+
+
+def is_closed_mesh(vertices: np.ndarray, faces: np.ndarray) -> bool:
+    """
+    Whether the mesh bounds a volume: every edge shared by exactly two faces, with
+    consistent winding. Vertices that coincide are merged first, since a surface split
+    along a seam is still closed geometrically, which is all the occupancy query needs.
+    """
+    import trimesh
+
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
+    return bool(mesh.is_watertight and mesh.is_winding_consistent)
 
 
 def preprocess_mesh(
@@ -94,8 +113,9 @@ def preprocess_mesh(
     seed: int = 0,
 ) -> dict[str, np.ndarray]:
     """
-    Apply the sdf_gen preprocessing to a single mesh: watertighting, normalization into
-    the [-1, 1] cube, and sampling of the surface / volume / near-surface pools. The
+    Apply the sdf_gen preprocessing to a single mesh: watertighting (skipped for
+    already closed meshes if ``settings.skip_watertight_when_closed``), normalization
+    into the [-1, 1] cube, and sampling of the surface / volume / near-surface pools. The
     near-surface pool has ``num_surface * len(near_stddevs)`` points (the surface
     samples perturbed once per standard deviation, as in the reference script).
     Returns "surface", "vol_points", "vol_label", "near_points", and "near_label"
@@ -108,12 +128,15 @@ def preprocess_mesh(
     rng = np.random.default_rng(seed)
     vertices = np.asarray(vertices, dtype=np.float64)
     faces = np.ascontiguousarray(faces, dtype=np.int32)
-    vw, fw = pcu.make_mesh_watertight(
-        vertices,
-        faces,
-        settings.watertight_resolution,
-        seed=int(rng.integers(2**31)),
-    )
+    if settings.skip_watertight_when_closed and is_closed_mesh(vertices, faces):
+        vw, fw = vertices, faces
+    else:
+        vw, fw = pcu.make_mesh_watertight(
+            vertices,
+            faces,
+            settings.watertight_resolution,
+            seed=int(rng.integers(2**31)),
+        )
 
     shifts = (vw.max(axis=0) + vw.min(axis=0)) / 2
     vw = vw - shifts
