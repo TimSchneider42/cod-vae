@@ -33,7 +33,7 @@ import zlib
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -396,19 +396,20 @@ def _progress_bar(total: int, desc: str, unit: str, enabled: bool):
 def _run_category(
     out_root: Path,
     category: str,
-    tasks: list[tuple],
+    tasks: Iterable[tuple],
+    total: int,
     lst: Mapping[str, list[str]],
     workers: int,
     verbose: bool,
 ) -> dict[str, list[str]]:
     """
-    Run the preprocessing tasks of one category (in ``workers`` parallel processes if
-    requested) with a progress bar, drop objects whose preprocessing failed, and write
-    the category's train/val/test .lst files. Returns the surviving object ids per
-    split.
+    Run ``total`` preprocessing tasks of one category (in ``workers`` parallel
+    processes if requested) with a progress bar, drop objects whose preprocessing
+    failed, and write the category's train/val/test .lst files. ``tasks`` may be a
+    lazy iterable — it is consumed incrementally, so sources can stream mesh data
+    instead of materializing it up front. Returns the surviving object ids per split.
     """
     failed: set[str] = set()
-    total = len(tasks)
     skipped = sum(len(ids) for ids in lst.values()) - total
     if verbose and skipped > 0:
         print(f"[{category}] {skipped} objects already preprocessed; resuming")
@@ -552,7 +553,7 @@ def add_mesh_dir_source(
                     extras,
                 )
             )
-    return _run_category(out_root, category, tasks, lst, workers, verbose)
+    return _run_category(out_root, category, tasks, len(tasks), lst, workers, verbose)
 
 
 def add_hf_source(
@@ -581,17 +582,20 @@ def add_hf_source(
     out_root = Path(out_root)
     if settings is None:
         settings = SdfGenSettings()
-    split_datasets = _load_hf_splits(dataset, split_map)
+    if verbose:
+        print(f"[{category}] loading {dataset}")
+    split_datasets = {
+        src_split: ds.with_format("numpy")
+        for src_split, ds in _load_hf_splits(dataset, split_map).items()
+    }
     resolved_map = _resolve_split_map(list(split_datasets), split_map)
     _check_category_free(out_root, category)
 
-    tasks: list[tuple] = []
     lst: dict[str, list[str]] = {split: [] for split in SPLITS}
+    pending: list[tuple[str, int, str]] = []
     for src_split, ds in split_datasets.items():
-        ds = ds.with_format("numpy")
-        columns = set(ds.column_names)
         for required in ("mesh.vertices", "mesh.faces"):
-            if required not in columns:
+            if required not in ds.column_names:
                 raise ValueError(
                     f"{dataset}[{src_split}] has no {required!r} column; expected a "
                     f"mesh dataset in the Tactile MNIST format"
@@ -604,20 +608,29 @@ def add_hf_source(
             lst[resolved_map[src_split]].append(object_id)
             if _outputs_exist(out_root, category, object_id) and not overwrite:
                 continue
+            pending.append((src_split, index, object_id))
+
+    def tasks() -> Iterable[tuple]:
+        # Rows are loaded lazily, one mesh at a time, so preprocessing (and the
+        # progress bar) starts immediately and memory use stays flat.
+        for src_split, index, object_id in pending:
+            ds = split_datasets[src_split]
             row = ds[index]
+            columns = set(ds.column_names)
             extras = {key: row[key] for key in ("id", "label") if key in columns}
-            tasks.append(
-                (
-                    str(out_root),
-                    category,
-                    object_id,
-                    (np.asarray(row["mesh.vertices"]), np.asarray(row["mesh.faces"])),
-                    settings,
-                    _object_seed(seed, src_split, index),
-                    extras,
-                )
+            yield (
+                str(out_root),
+                category,
+                object_id,
+                (np.asarray(row["mesh.vertices"]), np.asarray(row["mesh.faces"])),
+                settings,
+                _object_seed(seed, src_split, index),
+                extras,
             )
-    return _run_category(out_root, category, tasks, lst, workers, verbose)
+
+    return _run_category(
+        out_root, category, tasks(), len(pending), lst, workers, verbose
+    )
 
 
 def build_vecset_dataset(
