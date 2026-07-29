@@ -206,6 +206,7 @@ def merge_vecset_root(
     link: str = "symlink",
     fraction: float = 1.0,
     seed: int = 0,
+    verbose: bool = True,
 ) -> list[str]:
     """
     Merge an existing preprocessed root (ShapeNetV2_point + ShapeNetV2_surface) into
@@ -273,18 +274,25 @@ def merge_vecset_root(
                 "".join(f"{object_id}\n" for object_id in kept)
             )
             kept_ids.update(kept)
-        for object_id in sorted(kept_ids):
-            _link_file(
-                src_cat / f"{object_id}.npz", dst_point / f"{object_id}.npz", link
-            )
-            _link_file(
-                src_cat / f"{object_id}.npy", dst_point / f"{object_id}.npy", link
-            )
-            _link_file(
-                src_surface / f"{object_id}.npz",
-                dst_surface / f"{object_id}.npz",
-                link,
-            )
+        bar = _progress_bar(len(kept_ids), f"{category} ({link})", "object", verbose)
+        try:
+            for object_id in sorted(kept_ids):
+                _link_file(
+                    src_cat / f"{object_id}.npz", dst_point / f"{object_id}.npz", link
+                )
+                _link_file(
+                    src_cat / f"{object_id}.npy", dst_point / f"{object_id}.npy", link
+                )
+                _link_file(
+                    src_surface / f"{object_id}.npz",
+                    dst_surface / f"{object_id}.npz",
+                    link,
+                )
+                if bar is not None:
+                    bar.update(1)
+        finally:
+            if bar is not None:
+                bar.close()
         categories.append(category)
     return categories
 
@@ -374,6 +382,17 @@ def _outputs_exist(out_root: Path, category: str, object_id: str) -> bool:
     )
 
 
+def _progress_bar(total: int, desc: str, unit: str, enabled: bool):
+    """A tqdm bar, or None if tqdm is unavailable or there is nothing to show."""
+    if not enabled or total == 0:
+        return None
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return None
+    return tqdm(total=total, desc=desc, unit=unit, dynamic_ncols=True)
+
+
 def _run_category(
     out_root: Path,
     category: str,
@@ -384,48 +403,62 @@ def _run_category(
 ) -> dict[str, list[str]]:
     """
     Run the preprocessing tasks of one category (in ``workers`` parallel processes if
-    requested), drop objects whose preprocessing failed, and write the category's
-    train/val/test .lst files. Returns the surviving object ids per split.
+    requested) with a progress bar, drop objects whose preprocessing failed, and write
+    the category's train/val/test .lst files. Returns the surviving object ids per
+    split.
     """
     failed: set[str] = set()
+    total = len(tasks)
+    skipped = sum(len(ids) for ids in lst.values()) - total
+    if verbose and skipped > 0:
+        print(f"[{category}] {skipped} objects already preprocessed; resuming")
+    bar = _progress_bar(total, category, "mesh", verbose)
 
     def handle_failure(object_id: str, exc: BaseException) -> None:
         failed.add(object_id)
-        print(
-            f"[{category}] {object_id}: preprocessing failed ({exc}); dropping",
-            file=sys.stderr,
-        )
+        message = f"[{category}] {object_id}: preprocessing failed ({exc}); dropping"
+        if bar is not None:
+            bar.write(message, file=sys.stderr)
+        else:
+            print(message, file=sys.stderr)
 
-    total = len(tasks)
-    if workers > 0:
-        with ProcessPoolExecutor(max_workers=workers) as pool:
-            pending = {}
-            queue = iter(tasks)
-            done_count = 0
-            while pending or done_count < total:
-                while len(pending) < 2 * workers:
-                    task = next(queue, None)
-                    if task is None:
+    def advance(object_id: str, done_count: int) -> None:
+        if bar is not None:
+            bar.update(1)
+        elif verbose:
+            print(f"[{category}] {done_count}/{total} {object_id}")
+
+    try:
+        if workers > 0:
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                pending = {}
+                queue = iter(tasks)
+                done_count = 0
+                while pending or done_count < total:
+                    while len(pending) < 2 * workers:
+                        task = next(queue, None)
+                        if task is None:
+                            break
+                        pending[pool.submit(_process_object, task)] = task[2]
+                    if not pending:
                         break
-                    pending[pool.submit(_process_object, task)] = task[2]
-                if not pending:
-                    break
-                finished, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in finished:
-                    object_id = pending.pop(future)
-                    done_count += 1
-                    if future.exception() is not None:
-                        handle_failure(object_id, future.exception())
-                    elif verbose:
-                        print(f"[{category}] {done_count}/{total} {object_id}")
-    else:
-        for done_count, task in enumerate(tasks, start=1):
-            try:
-                _process_object(task)
-                if verbose:
-                    print(f"[{category}] {done_count}/{total} {task[2]}")
-            except Exception as exc:
-                handle_failure(task[2], exc)
+                    finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in finished:
+                        object_id = pending.pop(future)
+                        done_count += 1
+                        if future.exception() is not None:
+                            handle_failure(object_id, future.exception())
+                        advance(object_id, done_count)
+        else:
+            for done_count, task in enumerate(tasks, start=1):
+                try:
+                    _process_object(task)
+                except Exception as exc:
+                    handle_failure(task[2], exc)
+                advance(task[2], done_count)
+    finally:
+        if bar is not None:
+            bar.close()
 
     lst = {
         split: [object_id for object_id in ids if object_id not in failed]
@@ -626,7 +659,7 @@ def build_vecset_dataset(
 
     for src_root, fraction in vecset_sources:
         categories = merge_vecset_root(
-            src_root, out_dir, link=link, fraction=fraction, seed=seed
+            src_root, out_dir, link=link, fraction=fraction, seed=seed, verbose=verbose
         )
         if verbose:
             print(

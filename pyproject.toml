@@ -28,9 +28,9 @@ jax-cpu = ["jax"]
 train = ["optax"]
 hub = ["huggingface_hub"]
 convert = ["torch", "pyyaml"]
-preprocess = ["point-cloud-utils", "datasets"]
+preprocess = ["point-cloud-utils", "datasets", "tqdm"]
 tests = ["pytest", "point-cloud-utils"]
-all = ["torch", "jax[cuda12]", "optax", "huggingface_hub", "pyyaml", "point-cloud-utils", "datasets", "pytest"]
+all = ["torch", "jax[cuda12]", "optax", "huggingface_hub", "pyyaml", "point-cloud-utils", "datasets", "tqdm", "pytest"]
 
 [project.scripts]
 cod-vae-convert = "cod_vae.cli:convert_main"
