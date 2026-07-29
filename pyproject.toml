@@ -28,12 +28,14 @@ jax-cpu = ["jax"]
 train = ["optax"]
 hub = ["huggingface_hub"]
 convert = ["torch", "pyyaml"]
+preprocess = ["point-cloud-utils", "datasets"]
 tests = ["pytest"]
-all = ["torch", "jax[cuda12]", "optax", "huggingface_hub", "pyyaml", "pytest"]
+all = ["torch", "jax[cuda12]", "optax", "huggingface_hub", "pyyaml", "point-cloud-utils", "datasets", "pytest"]
 
 [project.scripts]
 cod-vae-convert = "cod_vae.cli:convert_main"
 cod-vae-train = "cod_vae.cli:train_main"
+cod-vae-dataset = "cod_vae.cli:dataset_main"
 
 [tool.setuptools.packages.find]
 include = ["cod_vae*"]

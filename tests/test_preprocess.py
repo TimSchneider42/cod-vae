@@ -1,0 +1,245 @@
+"""
+Tests for the sdf_gen-style preprocessing and the cod-vae-dataset merge tool: the
+preprocessing must produce geometrically consistent occupancy pools, and merged outputs
+(linked vecset roots + preprocessed Hugging Face mesh datasets) must load directly with
+ShapeNetVecSetDataset.
+"""
+
+import numpy as np
+import pytest
+import trimesh
+
+pytest.importorskip("point_cloud_utils")
+datasets = pytest.importorskip("datasets")
+
+from cod_vae.training import ShapeNetVecSetDataset
+from cod_vae.training.preprocess import (
+    SdfGenSettings,
+    build_vecset_dataset,
+    preprocess_mesh,
+)
+
+TINY = SdfGenSettings(num_vol=2000, num_surface=1000, watertight_resolution=1000)
+
+
+def test_preprocess_mesh_geometry():
+    sphere = trimesh.creation.icosphere(subdivisions=3, radius=2.0)
+    data = preprocess_mesh(sphere.vertices, sphere.faces, TINY, seed=0)
+
+    assert data["surface"].shape == (1000, 3)
+    assert data["vol_points"].shape == (2000, 3)
+    assert data["vol_label"].shape == (2000,)
+    # Two noise scales, each applied to the full surface pool (as in sdf_gen).
+    assert data["near_points"].shape == (2000, 3)
+    assert data["near_label"].shape == (2000,)
+    for key in data:
+        assert data[key].dtype == np.float32
+
+    # The sphere is normalized to radius ~0.9; surface points must lie on it and
+    # volume queries must be labeled by containment (1 inside, 0 outside).
+    radii = np.linalg.norm(data["surface"], axis=1)
+    assert 0.75 < radii.mean() < 1.0
+    vol_radii = np.linalg.norm(data["vol_points"], axis=1)
+    np.testing.assert_array_equal(data["vol_label"][vol_radii < 0.5], 1.0)
+    np.testing.assert_array_equal(data["vol_label"][vol_radii > 1.2], 0.0)
+
+    # Deterministic given the seed.
+    again = preprocess_mesh(sphere.vertices, sphere.faces, TINY, seed=0)
+    np.testing.assert_array_equal(data["vol_points"], again["vol_points"])
+    other = preprocess_mesh(sphere.vertices, sphere.faces, TINY, seed=1)
+    assert not np.array_equal(data["vol_points"], other["vol_points"])
+
+
+@pytest.fixture(scope="module")
+def hf_dataset_dir(tmp_path_factory):
+    """A tiny mesh dataset in the Tactile MNIST format, saved with save_to_disk."""
+    meshes = [
+        trimesh.creation.box(extents=[1.0, 0.6, 0.4]),
+        trimesh.creation.icosphere(subdivisions=2, radius=0.5),
+    ]
+
+    def split(items):
+        return datasets.Dataset.from_dict(
+            {
+                "id": list(range(len(items))),
+                "label": [i % 2 for i in range(len(items))],
+                "mesh.vertices": [np.asarray(m.vertices, np.float32) for m in items],
+                "mesh.faces": [np.asarray(m.faces, np.int32) for m in items],
+            }
+        )
+
+    dataset = datasets.DatasetDict(
+        {
+            "train": split(meshes),
+            "test": split(meshes[:1]),
+            "holdout": split(meshes[:1]),
+        }
+    )
+    path = tmp_path_factory.mktemp("hf") / "toy_meshes"
+    dataset.save_to_disk(str(path))
+    return path
+
+
+@pytest.fixture(scope="module")
+def vecset_source_dir(tmp_path_factory):
+    """A minimal preprocessed root in the layout of the original authors' data."""
+    root = tmp_path_factory.mktemp("vecset") / "root"
+    point_dir = root / "ShapeNetV2_point" / "02691156"
+    surface_dir = root / "ShapeNetV2_surface" / "02691156" / "4_pointcloud"
+    point_dir.mkdir(parents=True)
+    surface_dir.mkdir(parents=True)
+    rng = np.random.default_rng(0)
+    np.savez(
+        point_dir / "obj0.npz",
+        vol_points=rng.uniform(-1, 1, (200, 3)).astype(np.float32),
+        vol_label=rng.integers(0, 2, 200).astype(np.float32),
+        near_points=rng.uniform(-1, 1, (200, 3)).astype(np.float32),
+        near_label=rng.integers(0, 2, 200).astype(np.float32),
+    )
+    np.save(point_dir / "obj0.npy", np.float64(1.0))
+    np.savez(
+        surface_dir / "obj0.npz",
+        points=rng.uniform(-1, 1, (200, 3)).astype(np.float32),
+    )
+    (point_dir / "train.lst").write_text("obj0\n")
+    (point_dir / "val.lst").write_text("")
+    (point_dir / "test.lst").write_text("")
+    return root
+
+
+def test_build_and_load_merged_dataset(tmp_path, hf_dataset_dir, vecset_source_dir):
+    out = tmp_path / "merged"
+    build_vecset_dataset(
+        out,
+        vecset_sources=[vecset_source_dir],
+        hf_sources=[("toy", str(hf_dataset_dir))],
+        settings=TINY,
+        verbose=False,
+    )
+
+    assert (out / "ShapeNetV2_point" / "02691156").is_symlink()
+    toy_point = out / "ShapeNetV2_point" / "toy"
+    # Default split mapping: train and test are picked up, "holdout" is ignored.
+    assert toy_point / "train.lst" in list(toy_point.iterdir())
+    assert (toy_point / "train.lst").read_text().split() == [
+        "train_000000",
+        "train_000001",
+    ]
+    assert (toy_point / "test.lst").read_text().split() == ["test_000000"]
+    assert (toy_point / "val.lst").read_text() == ""
+    # Extras from the source rows are preserved for provenance.
+    stored = np.load(toy_point / "train_000001.npz")
+    assert int(stored["id"]) == 1 and int(stored["label"]) == 1
+
+    dataset = ShapeNetVecSetDataset(
+        out, split="train", pc_size=64, num_vol_queries=64, num_near_queries=64
+    )
+    assert len(dataset) == 3  # obj0 + two toy meshes
+    item = dataset[len(dataset) - 1]
+    assert item["surface"].shape == (64, 3)
+    assert item["queries"].shape == (128, 3)
+    assert item["labels"].shape == (128,)
+    assert set(np.unique(item["labels"])) <= {0.0, 1.0}
+
+    # A second build over the same output must fail on the linked source collision.
+    with pytest.raises(FileExistsError):
+        build_vecset_dataset(
+            out, vecset_sources=[vecset_source_dir], settings=TINY, verbose=False
+        )
+
+
+def test_mesh_dir_source(tmp_path):
+    from cod_vae.cli import dataset_main
+    from cod_vae.training.preprocess import add_mesh_dir_source
+
+    # A directory with train/val subdirectories and one non-watertight mesh (an open
+    # box), which the sdf_gen preprocessing must repair via watertighting.
+    mesh_dir = tmp_path / "meshes"
+    (mesh_dir / "train").mkdir(parents=True)
+    (mesh_dir / "val").mkdir()
+    box = trimesh.creation.box(extents=[1.0, 0.6, 0.4])
+    open_box = trimesh.Trimesh(box.vertices, box.faces[:-2])
+    assert not open_box.is_watertight
+    box.export(mesh_dir / "train" / "box.stl")
+    open_box.export(mesh_dir / "train" / "open_box.obj")
+    trimesh.creation.icosphere(subdivisions=2).export(mesh_dir / "val" / "sphere.ply")
+    # A flat directory (no split subdirectories): everything becomes training data.
+    flat_dir = tmp_path / "flat"
+    flat_dir.mkdir()
+    box.export(flat_dir / "box.glb")
+
+    out = tmp_path / "merged"
+    dataset_main(
+        [
+            str(out),
+            "--meshes",
+            f"toy={mesh_dir}",
+            "--meshes",
+            str(flat_dir),
+            "--num-vol",
+            "2000",
+            "--num-surface",
+            "1000",
+            "--watertight-resolution",
+            "1000",
+        ]
+    )
+    toy_point = out / "ShapeNetV2_point" / "toy"
+    assert (toy_point / "train.lst").read_text().split() == [
+        "train_000000",
+        "train_000001",
+    ]
+    assert (toy_point / "val.lst").read_text().split() == ["val_000000"]
+    assert (out / "ShapeNetV2_point" / "flat" / "train.lst").read_text().split() == [
+        "train_000000"
+    ]
+    stored = np.load(toy_point / "train_000001.npz")
+    assert str(stored["source_file"]) == "train/open_box.obj"
+
+    dataset = ShapeNetVecSetDataset(
+        out, split="train", pc_size=64, num_vol_queries=64, num_near_queries=64
+    )
+    assert len(dataset) == 3
+    item = dataset[0]
+    assert item["labels"].shape == (128,)
+
+    # Mesh files outside the split subdirectories are rejected, not silently dropped.
+    box.export(mesh_dir / "stray.stl")
+    with pytest.raises(ValueError, match="mixes"):
+        add_mesh_dir_source(tmp_path / "other", "toy2", mesh_dir)
+
+
+def test_dataset_cli_with_split_map_and_workers(tmp_path, hf_dataset_dir):
+    from cod_vae.cli import dataset_main
+
+    out = tmp_path / "merged"
+    dataset_main(
+        [
+            str(out),
+            "--hf",
+            f"toy={hf_dataset_dir}",
+            "--hf-split",
+            "train",
+            "--hf-split",
+            "holdout=val",
+            "--workers",
+            "2",
+            "--num-vol",
+            "2000",
+            "--num-surface",
+            "1000",
+            "--watertight-resolution",
+            "1000",
+        ]
+    )
+    toy_point = out / "ShapeNetV2_point" / "toy"
+    assert (toy_point / "train.lst").read_text().split() == [
+        "train_000000",
+        "train_000001",
+    ]
+    assert (toy_point / "val.lst").read_text().split() == ["holdout_000000"]
+    assert (toy_point / "test.lst").read_text() == ""
+    dataset = ShapeNetVecSetDataset(
+        out, split="val", pc_size=64, num_vol_queries=64, num_near_queries=64
+    )
+    assert len(dataset) == 1

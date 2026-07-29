@@ -11,13 +11,21 @@ from .data import (
     compute_occupancy_data,
     iterate_batches,
 )
+from .preprocess import (
+    SdfGenSettings,
+    build_vecset_dataset,
+    preprocess_mesh,
+)
 from .vecset import ShapeNetVecSetDataset
 
 __all__ = [
     "MeshOccupancyDataset",
+    "SdfGenSettings",
     "ShapeNetVecSetDataset",
     "TrainingConfig",
     "axis_scaling",
+    "build_vecset_dataset",
     "compute_occupancy_data",
     "iterate_batches",
+    "preprocess_mesh",
 ]

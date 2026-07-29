@@ -61,7 +61,9 @@ def compute_occupancy_data(
     near_points = np.clip(near_points, -1.0, 1.0)
     if not normalized.is_watertight:
         raise ValueError(
-            "Occupancy labels require a watertight mesh; got a non-watertight mesh."
+            "Occupancy labels require a watertight mesh; got a non-watertight mesh. "
+            "For arbitrary meshes, build a dataset with cod-vae-dataset instead, "
+            "which makes meshes watertight automatically."
         )
     vol_label = normalized.contains(vol_points).astype(np.float32)
     near_label = normalized.contains(near_points).astype(np.float32)
