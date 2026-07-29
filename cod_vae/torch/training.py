@@ -10,6 +10,7 @@ environment automatically; batch_size is per process.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -247,10 +248,20 @@ def train(
             sampler.set_epoch(epoch)
         for step, batch in enumerate(loader):
             batch = {key: value.to(device) for key, value in batch.items()}
-            outputs = model(batch["surface"], batch["queries"], batch["labels"])
-            loss = outputs["loss"] / train_config.accumulate_grad_batches
-            loss.backward()
-            if (step + 1) % train_config.accumulate_grad_batches == 0:
+            updating = (step + 1) % train_config.accumulate_grad_batches == 0
+            # Gradients of the micro-batches in between are only accumulated locally;
+            # all-reducing them too would move the same 750 MB twice per update for a
+            # mathematically identical result.
+            sync = (
+                contextlib.nullcontext()
+                if updating or not distributed
+                else model.no_sync()
+            )
+            with sync:
+                outputs = model(batch["surface"], batch["queries"], batch["labels"])
+                loss = outputs["loss"] / train_config.accumulate_grad_batches
+                loss.backward()
+            if updating:
                 torch.nn.utils.clip_grad_norm_(trainable, train_config.grad_clip)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
