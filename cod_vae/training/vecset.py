@@ -15,10 +15,17 @@ on. Expects the directory layout used by the reference implementation:
 Items follow the same interface as :class:`cod_vae.training.MeshOccupancyDataset`
 (numpy dicts with "surface", "queries" (volume first), and "labels"), so the dataset
 plugs directly into both backends' training loops.
+
+Every item reads a few thousand of the ~500k points a pool file holds, so the pools are
+read in row blocks instead of whole (see :class:`_PoolFile`), which is what keeps
+training IO-bound only on pathologically slow storage.
 """
 
 from __future__ import annotations
 
+import ast
+import struct
+import zipfile
 from pathlib import Path
 from typing import Sequence
 
@@ -27,6 +34,94 @@ import numpy as np
 from .data import axis_scaling
 
 __all__ = ["ShapeNetVecSetDataset"]
+
+
+class _PoolFile:
+    """
+    Row-block reads from an .npz, without materializing whole arrays.
+
+    np.savez stores every array as a contiguous, uncompressed .npy member inside a zip
+    container, so a block of rows is one seek plus one read -- 50 KB instead of the 7 MB
+    a full pool file costs, which is the difference between an IO-bound and a GPU-bound
+    training step. Compressed archives (np.savez_compressed) have no such layout; for
+    those, :meth:`rows` falls back to reading the array and slicing it.
+    """
+
+    # Layouts are parsed once per file and reused: with repeat > 1 the same pools are
+    # revisited many times per epoch, and on network storage every avoided open or seek
+    # is a round trip.
+    _layouts: dict[Path, dict[str, tuple[int, np.dtype, tuple[int, ...]]] | None] = {}
+    _layout_limit = 200_000
+
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+        self._handle = None
+        if self.path not in self._layouts:
+            if len(self._layouts) >= self._layout_limit:
+                self._layouts.clear()
+            self._layouts[self.path] = self._read_layout()
+        self.members = self._layouts[self.path]
+
+    def __enter__(self) -> "_PoolFile":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+    @property
+    def handle(self):
+        if self._handle is None:
+            self._handle = self.path.open("rb")
+        return self._handle
+
+    def _read_layout(self):
+        """Offset, dtype and shape of every member, or None if they are not readable."""
+        handle = self.handle
+        with zipfile.ZipFile(handle) as archive:
+            infos = archive.infolist()
+        if any(info.compress_type != zipfile.ZIP_STORED for info in infos):
+            return None
+        layout = {}
+        for info in infos:
+            handle.seek(info.header_offset)
+            # The local header repeats the name and may carry a different extra field
+            # than the central directory entry, so it decides where the bytes start.
+            name_len, extra_len = struct.unpack("<HH", handle.read(30)[26:30])
+            handle.seek(info.header_offset + 30 + name_len + extra_len)
+            if handle.read(6) != b"\x93NUMPY":
+                return None
+            major = handle.read(2)[0]
+            header_len = int.from_bytes(handle.read(2 if major == 1 else 4), "little")
+            header = ast.literal_eval(handle.read(header_len).decode("latin1"))
+            if header["fortran_order"]:
+                return None
+            layout[info.filename.removesuffix(".npy")] = (
+                handle.tell(),
+                np.dtype(header["descr"]),
+                header["shape"],
+            )
+        return layout
+
+    def length(self, key: str) -> int:
+        if self.members is None:
+            with np.load(self.path) as data:
+                return len(data[key])
+        return self.members[key][2][0]
+
+    def rows(self, key: str, start: int, count: int) -> np.ndarray:
+        if self.members is None:
+            with np.load(self.path) as data:
+                return data[key][start : start + count]
+        offset, dtype, shape = self.members[key]
+        stride = dtype.itemsize * int(np.prod(shape[1:], dtype=np.int64))
+        self.handle.seek(offset + start * stride)
+        raw = self.handle.read(count * stride)
+        return np.frombuffer(raw, dtype=dtype).reshape((count, *shape[1:]))
 
 
 class ShapeNetVecSetDataset:
@@ -41,6 +136,7 @@ class ShapeNetVecSetDataset:
         augment: bool = True,
         repeat: int = 1,
         seed: int = 0,
+        near_groups: int = 2,
     ):
         self.root_dir = Path(root_dir)
         self.point_dir = self.root_dir / "ShapeNetV2_point"
@@ -51,7 +147,12 @@ class ShapeNetVecSetDataset:
         self.augment = augment
         self.repeat = repeat
         self.seed = seed
+        # The near-surface pool is the surface samples perturbed once per noise standard
+        # deviation and concatenated (two in the reference data), so a sample takes a
+        # block out of each group to keep the mix of noise levels.
+        self.near_groups = near_groups
         self.epoch = 0
+        self._scales: dict[tuple[str, str], float] = {}
 
         if categories is None:
             categories = sorted(
@@ -74,32 +175,62 @@ class ShapeNetVecSetDataset:
     def __len__(self) -> int:
         return len(self.items) * self.repeat
 
+    @staticmethod
+    def _start(rng: np.random.Generator, total: int, count: int, offset: int = 0) -> int:
+        """Start of a random block of ``count`` rows within ``total`` rows."""
+        if count > total:
+            raise ValueError(f"Cannot draw {count} points from a pool of {total}")
+        return offset + int(rng.integers(0, total - count + 1))
+
     def __getitem__(self, index: int) -> dict[str, np.ndarray]:
         category, object_id = self.items[index % len(self.items)]
         rng = np.random.default_rng((self.seed, self.epoch, index))
 
-        query_data = np.load(self.point_dir / category / f"{object_id}.npz")
-        scale = float(np.load(self.point_dir / category / f"{object_id}.npy"))
-        surface_data = np.load(
+        scale = self._scales.get((category, object_id))
+        if scale is None:
+            scale = float(np.load(self.point_dir / category / f"{object_id}.npy"))
+            self._scales[(category, object_id)] = scale
+
+        queries_file = _PoolFile(self.point_dir / category / f"{object_id}.npz")
+        surface_file = _PoolFile(
             self.surface_dir / category / "4_pointcloud" / f"{object_id}.npz"
         )
 
-        surface = surface_data["points"]
-        surface = surface[rng.choice(surface.shape[0], self.pc_size, replace=False)]
+        # The pools are sampled independently and identically per shape, so a contiguous
+        # block is distributed exactly like a random subset -- and costs one read
+        # instead of one per point. This is also what the reference implementation's
+        # chunked HDF5 sampling approximates.
+        start = self._start(rng, surface_file.length("points"), self.pc_size)
+        surface = surface_file.rows("points", start, self.pc_size)
         surface = surface.astype(np.float32) * scale
 
-        vol_points, vol_label = query_data["vol_points"], query_data["vol_label"]
-        near_points, near_label = query_data["near_points"], query_data["near_label"]
-        vol_idx = rng.choice(vol_points.shape[0], self.num_vol_queries, replace=False)
-        near_idx = rng.choice(
-            near_points.shape[0], self.num_near_queries, replace=False
+        vol_start = self._start(
+            rng, queries_file.length("vol_points"), self.num_vol_queries
         )
-        queries = np.concatenate([vol_points[vol_idx], near_points[near_idx]]).astype(
-            np.float32
-        )
-        labels = np.concatenate([vol_label[vol_idx], near_label[near_idx]]).astype(
-            np.float32
-        )
+        blocks = [
+            (
+                queries_file.rows("vol_points", vol_start, self.num_vol_queries),
+                queries_file.rows("vol_label", vol_start, self.num_vol_queries),
+            )
+        ]
+        near_total = queries_file.length("near_points")
+        groups = self.near_groups if near_total % self.near_groups == 0 else 1
+        group_size = near_total // groups
+        for group in range(groups):
+            count = self.num_near_queries // groups
+            if group == groups - 1:
+                count = self.num_near_queries - count * (groups - 1)
+            near_start = self._start(rng, group_size, count, offset=group * group_size)
+            blocks.append(
+                (
+                    queries_file.rows("near_points", near_start, count),
+                    queries_file.rows("near_label", near_start, count),
+                )
+            )
+        queries = np.concatenate([points for points, _ in blocks]).astype(np.float32)
+        labels = np.concatenate([label for _, label in blocks]).astype(np.float32)
+        queries_file.close()
+        surface_file.close()
 
         if self.augment:
             surface, queries = axis_scaling(surface, queries, rng)
