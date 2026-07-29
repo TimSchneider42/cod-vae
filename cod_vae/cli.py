@@ -226,6 +226,14 @@ def dataset_main(argv: list[str] | None = None) -> None:
         "in-process)",
     )
     parser.add_argument(
+        "--shard",
+        metavar="INDEX/COUNT",
+        help="preprocess only shard INDEX of COUNT (e.g. 0/4), so a build can be split "
+        "over several machines. Sharded runs write no .lst files and skip --vecset "
+        "sources; finish with one unsharded run over the same sources, which links "
+        "the vecset sources, writes the lists, and picks up anything a shard missed",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=0,
@@ -296,6 +304,15 @@ def dataset_main(argv: list[str] | None = None) -> None:
             name = Path(source.rstrip("/")).name
         return name, source, fraction
 
+    shard, num_shards = 0, 1
+    if args.shard:
+        try:
+            shard, num_shards = (int(part) for part in args.shard.split("/", 1))
+        except ValueError:
+            parser.error(f"--shard must look like INDEX/COUNT, got {args.shard!r}")
+        if num_shards < 1 or not 0 <= shard < num_shards:
+            parser.error(f"--shard index out of range: {args.shard!r}")
+
     mesh_sources = [parse_source(spec) for spec in args.meshes]
     hf_sources = [parse_source(spec) for spec in args.hf]
     vecset_sources = [split_fraction(spec) for spec in args.vecset]
@@ -324,8 +341,16 @@ def dataset_main(argv: list[str] | None = None) -> None:
         workers=args.workers,
         overwrite=args.overwrite,
         skip_failed=args.skip_failed,
+        shard=shard,
+        num_shards=num_shards,
     )
-    print(f"Dataset written to {args.out_dir}")
+    if num_shards > 1:
+        print(
+            f"Shard {shard}/{num_shards} of {args.out_dir} done; run without --shard "
+            f"once all shards finished to assemble the dataset"
+        )
+    else:
+        print(f"Dataset written to {args.out_dir}")
 
 
 def main(argv: list[str] | None = None) -> None:

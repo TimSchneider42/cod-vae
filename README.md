@@ -98,7 +98,8 @@ Checkpoints are self-contained npz files loadable by both backends (and by `CODV
 - `--vecset PATH`: an existing preprocessed root as distributed by the 3DShape2VecSet authors, merged as-is (symlinked by default; `--link hardlink|copy` to materialize).
 
 Every source accepts an optional `:FRACTION` suffix (e.g. `--hf TimSchneider42/tactile-mnist-mnist3d:0.1`) to keep only a deterministic random subsample of each split; the selection is controlled by `--seed` (default 0), so the same command always yields the same subset.
-Preprocessing is resumable (existing outputs are skipped unless `--overwrite` is given) and parallelizes with `--workers`.
+Preprocessing is resumable (existing outputs are skipped unless `--overwrite` is given) and parallelizes with `--workers`, each of which gets its own slice of the available cores (the watertighting and winding-number code parallelizes internally over all cores, which otherwise oversubscribes the machine badly).
+Large builds can additionally be spread over several machines with `--shard INDEX/COUNT`: every shard preprocesses its share of the meshes, and a final run without `--shard` links the `--vecset` sources and writes the `.lst` files.
 A mesh that fails preprocessing aborts the build; pass `--skip-failed` to instead drop failing meshes with a warning (the behavior of the original sdf_gen script).
 
 ```bash

@@ -26,6 +26,7 @@ datasets (``pip install cod-vae[preprocess]``).
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import shutil
 import sys
@@ -186,6 +187,13 @@ def _subsample(items: Sequence, fraction: float, seed: int, key: str) -> list:
     rng = np.random.default_rng([seed, zlib.crc32(key.encode())])
     keep = np.sort(rng.choice(len(items), size=count, replace=False))
     return [items[int(i)] for i in keep]
+
+
+def _shard(items: Sequence, shard: int, num_shards: int) -> list:
+    """Keep every ``num_shards``-th item, starting at ``shard``."""
+    if num_shards < 1 or not 0 <= shard < num_shards:
+        raise ValueError(f"Invalid shard {shard} of {num_shards}")
+    return list(items[shard::num_shards])
 
 
 def _object_seed(seed: int, split: str, index: int) -> int:
@@ -396,6 +404,29 @@ def _outputs_exist(out_root: Path, category: str, object_id: str) -> bool:
     )
 
 
+def _pin_worker(counter, workers: int) -> None:
+    """
+    Give each worker process its own slice of the available cores.
+
+    The watertighting and winding number code parallelizes internally over
+    ``hardware_concurrency`` threads, which ignores both the worker count and any cpuset
+    the process runs under. Without a pin, every worker spawns as many threads as the
+    machine has cores -- on a 80-core allocation that is thousands of threads fighting
+    over the same cores, and preprocessing runs several times slower than it should.
+    """
+    if not hasattr(os, "sched_setaffinity") or workers < 2:
+        return
+    cpus = sorted(os.sched_getaffinity(0))
+    per_worker = max(1, len(cpus) // workers)
+    if per_worker >= len(cpus):
+        return
+    with counter.get_lock():
+        index = counter.value
+        counter.value += 1
+    start = (index * per_worker) % len(cpus)
+    os.sched_setaffinity(0, cpus[start : start + per_worker])
+
+
 def _progress_bar(total: int, desc: str, unit: str, enabled: bool):
     """A tqdm bar, or None if tqdm is unavailable or there is nothing to show."""
     if not enabled or total == 0:
@@ -416,6 +447,7 @@ def _run_category(
     workers: int,
     skip_failed: bool,
     verbose: bool,
+    write_lists: bool = True,
 ) -> dict[str, list[str]]:
     """
     Run ``total`` preprocessing tasks of one category (in ``workers`` parallel
@@ -425,6 +457,9 @@ def _run_category(
     abort). ``tasks`` may be a lazy iterable — it is consumed incrementally, so
     sources can stream mesh data instead of materializing it up front. Returns the
     surviving object ids per split.
+
+    ``write_lists=False`` leaves the .lst files untouched, which is what one shard of a
+    distributed build has to do: it only knows about its own share of the objects.
     """
     failed: set[str] = set()
     skipped = sum(len(ids) for ids in lst.values()) - total
@@ -456,7 +491,11 @@ def _run_category(
 
     try:
         if workers > 0:
-            with ProcessPoolExecutor(max_workers=workers) as pool:
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                initializer=_pin_worker,
+                initargs=(multiprocessing.Value("i", 0), workers),
+            ) as pool:
                 try:
                     pending = {}
                     queue = iter(tasks)
@@ -502,10 +541,11 @@ def _run_category(
     }
     point_dir = out_root / POINT_DIR / category
     point_dir.mkdir(parents=True, exist_ok=True)
-    for split, ids in lst.items():
-        (point_dir / f"{split}.lst").write_text(
-            "".join(f"{object_id}\n" for object_id in ids)
-        )
+    if write_lists:
+        for split, ids in lst.items():
+            (point_dir / f"{split}.lst").write_text(
+                "".join(f"{object_id}\n" for object_id in ids)
+            )
     return lst
 
 
@@ -520,6 +560,8 @@ def add_mesh_dir_source(
     fraction: float = 1.0,
     skip_failed: bool = False,
     verbose: bool = True,
+    shard: int = 0,
+    num_shards: int = 1,
 ) -> dict[str, list[str]]:
     """
     Preprocess a directory of mesh files (recursively, all trimesh-loadable formats in
@@ -534,6 +576,10 @@ def add_mesh_dir_source(
     unchanged. A failing mesh aborts the run unless ``skip_failed`` is set, in which
     case it is reported and dropped. Returns the object ids per split, which are also
     written to the category's .lst files.
+
+    With ``num_shards > 1`` only every ``num_shards``-th object is processed and the
+    .lst files are left alone, so the work can be spread over several machines; a final
+    run without sharding then writes the lists (and picks up whatever a shard dropped).
     """
     out_root, mesh_dir = Path(out_root), Path(mesh_dir)
     _require_point_cloud_utils()
@@ -571,8 +617,10 @@ def add_mesh_dir_source(
     tasks: list[tuple] = []
     lst: dict[str, list[str]] = {split: [] for split in SPLITS}
     for split, paths in files.items():
-        indexed = _subsample(
-            list(enumerate(paths)), fraction, seed, f"{category}/{split}"
+        indexed = _shard(
+            _subsample(list(enumerate(paths)), fraction, seed, f"{category}/{split}"),
+            shard,
+            num_shards,
         )
         for index, path in indexed:
             object_id = f"{split}_{index:06d}"
@@ -592,7 +640,15 @@ def add_mesh_dir_source(
                 )
             )
     return _run_category(
-        out_root, category, tasks, len(tasks), lst, workers, skip_failed, verbose
+        out_root,
+        category,
+        tasks,
+        len(tasks),
+        lst,
+        workers,
+        skip_failed,
+        verbose,
+        write_lists=num_shards == 1,
     )
 
 
@@ -608,6 +664,8 @@ def add_hf_source(
     fraction: float = 1.0,
     skip_failed: bool = False,
     verbose: bool = True,
+    shard: int = 0,
+    num_shards: int = 1,
 ) -> dict[str, list[str]]:
     """
     Preprocess a Hugging Face mesh dataset into a new category directory of the vecset
@@ -619,6 +677,10 @@ def add_hf_source(
     run unless ``skip_failed`` is set, in which case it is reported and dropped (as in
     the reference script). With ``workers > 0``, meshes are processed in that many parallel processes. Returns the object ids per split, which
     are also written to the category's train/val/test .lst files.
+
+    With ``num_shards > 1`` only every ``num_shards``-th object is processed and the
+    .lst files are left alone, so the work can be spread over several machines; a final
+    run without sharding then writes the lists (and picks up whatever a shard dropped).
     """
     out_root = Path(out_root)
     _require_point_cloud_utils()
@@ -642,8 +704,12 @@ def add_hf_source(
                     f"{dataset}[{src_split}] has no {required!r} column; expected a "
                     f"mesh dataset in the Tactile MNIST format"
                 )
-        indices = _subsample(
-            list(range(len(ds))), fraction, seed, f"{category}/{src_split}"
+        indices = _shard(
+            _subsample(
+                list(range(len(ds))), fraction, seed, f"{category}/{src_split}"
+            ),
+            shard,
+            num_shards,
         )
         for index in indices:
             object_id = f"{src_split}_{index:06d}"
@@ -671,7 +737,15 @@ def add_hf_source(
             )
 
     return _run_category(
-        out_root, category, tasks(), len(pending), lst, workers, skip_failed, verbose
+        out_root,
+        category,
+        tasks(),
+        len(pending),
+        lst,
+        workers,
+        skip_failed,
+        verbose,
+        write_lists=num_shards == 1,
     )
 
 
@@ -688,6 +762,8 @@ def build_vecset_dataset(
     overwrite: bool = False,
     skip_failed: bool = False,
     verbose: bool = True,
+    shard: int = 0,
+    num_shards: int = 1,
 ) -> None:
     """
     Merge preprocessed vecset roots, directories of mesh files, and Hugging Face mesh
@@ -697,6 +773,11 @@ def build_vecset_dataset(
     subsampling fraction — ``(root, fraction)`` for vecset sources,
     ``(name, source, fraction)`` for the others — to deterministically keep only that
     share of each split (seeded by ``seed``).
+
+    With ``num_shards > 1`` only every ``num_shards``-th mesh is preprocessed, no .lst
+    files are written, and vecset sources (which are only linked) are skipped — that is
+    one job of a build spread over several machines. Run the same call once without
+    sharding afterwards to link the vecset sources and assemble the lists.
     """
     out_dir = Path(out_dir)
     vecset_sources = [
@@ -713,7 +794,7 @@ def build_vecset_dataset(
     def describe(source, fraction):
         return source if fraction >= 1 else f"{source} (fraction {fraction})"
 
-    for src_root, fraction in vecset_sources:
+    for src_root, fraction in vecset_sources if num_shards == 1 else []:
         categories = merge_vecset_root(
             src_root, out_dir, link=link, fraction=fraction, seed=seed, verbose=verbose
         )
@@ -740,6 +821,8 @@ def build_vecset_dataset(
             fraction=fraction,
             skip_failed=skip_failed,
             verbose=verbose,
+            shard=shard,
+            num_shards=num_shards,
         )
         report(mesh_dir, fraction, name, lst)
     for name, dataset, fraction in hf_sources:
@@ -755,5 +838,7 @@ def build_vecset_dataset(
             fraction=fraction,
             skip_failed=skip_failed,
             verbose=verbose,
+            shard=shard,
+            num_shards=num_shards,
         )
         report(dataset, fraction, name, lst)
