@@ -26,10 +26,12 @@ datasets (``pip install cod-vae[preprocess]``).
 
 from __future__ import annotations
 
+import itertools
 import multiprocessing
 import os
 import shutil
 import sys
+import time
 import zlib
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from dataclasses import dataclass
@@ -427,6 +429,14 @@ def _pin_worker(counter, workers: int) -> None:
     os.sched_setaffinity(0, cpus[start : start + per_worker])
 
 
+def _new_pool(workers: int) -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_pin_worker,
+        initargs=(multiprocessing.Value("i", 0), workers),
+    )
+
+
 def _progress_bar(total: int, desc: str, unit: str, enabled: bool):
     """A tqdm bar, or None if tqdm is unavailable or there is nothing to show."""
     if not enabled or total == 0:
@@ -448,6 +458,7 @@ def _run_category(
     skip_failed: bool,
     verbose: bool,
     write_lists: bool = True,
+    timeout: float | None = None,
 ) -> dict[str, list[str]]:
     """
     Run ``total`` preprocessing tasks of one category (in ``workers`` parallel
@@ -460,6 +471,9 @@ def _run_category(
 
     ``write_lists=False`` leaves the .lst files untouched, which is what one shard of a
     distributed build has to do: it only knows about its own share of the objects.
+    ``timeout`` treats a mesh that takes longer than that many seconds as failed, which
+    ``skip_failed`` alone cannot do: the watertighting of a pathological mesh does not
+    raise, it simply never returns.
     """
     failed: set[str] = set()
     skipped = sum(len(ids) for ids in lst.values()) - total
@@ -491,33 +505,63 @@ def _run_category(
 
     try:
         if workers > 0:
-            with ProcessPoolExecutor(
-                max_workers=workers,
-                initializer=_pin_worker,
-                initargs=(multiprocessing.Value("i", 0), workers),
-            ) as pool:
-                try:
-                    pending = {}
-                    queue = iter(tasks)
-                    done_count = 0
-                    while pending or done_count < total:
-                        while len(pending) < 2 * workers:
-                            task = next(queue, None)
-                            if task is None:
-                                break
-                            pending[pool.submit(_process_object, task)] = task[2]
-                        if not pending:
+            pool = _new_pool(workers)
+            try:
+                # future -> (task, submission time), so that the tasks of a pool that
+                # has to be torn down can be resubmitted to its replacement.
+                pending: dict = {}
+                queue = iter(tasks)
+                done_count = 0
+                while pending or done_count < total:
+                    while len(pending) < 2 * workers:
+                        task = next(queue, None)
+                        if task is None:
                             break
-                        finished, _ = wait(pending, return_when=FIRST_COMPLETED)
-                        for future in finished:
-                            object_id = pending.pop(future)
-                            done_count += 1
-                            if future.exception() is not None:
-                                handle_failure(object_id, future.exception())
-                            advance(object_id, done_count)
-                except BaseException:
+                        pending[pool.submit(_process_object, task)] = (
+                            task,
+                            time.monotonic(),
+                        )
+                    if not pending:
+                        break
+                    finished, _ = wait(
+                        pending, timeout=timeout, return_when=FIRST_COMPLETED
+                    )
+                    for future in finished:
+                        task, _ = pending.pop(future)
+                        done_count += 1
+                        if future.exception() is not None:
+                            handle_failure(task[2], future.exception())
+                        advance(task[2], done_count)
+                    if timeout is None:
+                        continue
+                    now = time.monotonic()
+                    overdue = [f for f, (_, t) in pending.items() if now - t > timeout]
+                    if not overdue:
+                        continue
+                    # A worker stuck inside the watertighting cannot be interrupted, so
+                    # the whole pool goes down with it and a fresh one picks up the
+                    # tasks that were still in flight.
+                    for future in overdue:
+                        task, _ = pending.pop(future)
+                        done_count += 1
+                        handle_failure(task[2], TimeoutError(f"exceeded {timeout:g}s"))
+                        advance(task[2], done_count)
+                    requeued = [task for task, _ in pending.values()]
+                    pending.clear()
+                    # The stuck worker sits in a C call and ignores shutdown, so it has
+                    # to be killed outright -- otherwise it keeps a core busy and the
+                    # interpreter joins it at exit.
+                    stuck = list(getattr(pool, "_processes", {}).values())
                     pool.shutdown(wait=False, cancel_futures=True)
-                    raise
+                    for process in stuck:
+                        process.kill()
+                    pool = _new_pool(workers)
+                    queue = itertools.chain(requeued, queue)
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown()
         else:
             for done_count, task in enumerate(tasks, start=1):
                 try:
@@ -562,6 +606,7 @@ def add_mesh_dir_source(
     verbose: bool = True,
     shard: int = 0,
     num_shards: int = 1,
+    timeout: float | None = None,
 ) -> dict[str, list[str]]:
     """
     Preprocess a directory of mesh files (recursively, all trimesh-loadable formats in
@@ -649,6 +694,7 @@ def add_mesh_dir_source(
         skip_failed,
         verbose,
         write_lists=num_shards == 1,
+        timeout=timeout,
     )
 
 
@@ -666,6 +712,7 @@ def add_hf_source(
     verbose: bool = True,
     shard: int = 0,
     num_shards: int = 1,
+    timeout: float | None = None,
 ) -> dict[str, list[str]]:
     """
     Preprocess a Hugging Face mesh dataset into a new category directory of the vecset
@@ -746,6 +793,7 @@ def add_hf_source(
         skip_failed,
         verbose,
         write_lists=num_shards == 1,
+        timeout=timeout,
     )
 
 
@@ -764,6 +812,7 @@ def build_vecset_dataset(
     verbose: bool = True,
     shard: int = 0,
     num_shards: int = 1,
+    timeout: float | None = None,
 ) -> None:
     """
     Merge preprocessed vecset roots, directories of mesh files, and Hugging Face mesh
@@ -823,6 +872,7 @@ def build_vecset_dataset(
             verbose=verbose,
             shard=shard,
             num_shards=num_shards,
+            timeout=timeout,
         )
         report(mesh_dir, fraction, name, lst)
     for name, dataset, fraction in hf_sources:
@@ -840,5 +890,6 @@ def build_vecset_dataset(
             verbose=verbose,
             shard=shard,
             num_shards=num_shards,
+            timeout=timeout,
         )
         report(dataset, fraction, name, lst)

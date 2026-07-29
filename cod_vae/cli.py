@@ -251,6 +251,14 @@ def dataset_main(argv: list[str] | None = None) -> None:
         "aborting the build",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        metavar="SECONDS",
+        help="treat a mesh that takes longer than this as failed (requires "
+        "--skip-failed to drop it): watertighting a pathological mesh can run for "
+        "hours without raising, which stalls an otherwise finished build",
+    )
+    parser.add_argument(
         "--num-vol", type=int, default=250_000, help="volume query pool size"
     )
     parser.add_argument(
@@ -343,6 +351,7 @@ def dataset_main(argv: list[str] | None = None) -> None:
         skip_failed=args.skip_failed,
         shard=shard,
         num_shards=num_shards,
+        timeout=args.timeout,
     )
     if num_shards > 1:
         print(

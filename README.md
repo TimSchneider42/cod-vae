@@ -101,6 +101,7 @@ Every source accepts an optional `:FRACTION` suffix (e.g. `--hf TimSchneider42/t
 Preprocessing is resumable (existing outputs are skipped unless `--overwrite` is given) and parallelizes with `--workers`, each of which gets its own slice of the available cores (the watertighting and winding-number code parallelizes internally over all cores, which otherwise oversubscribes the machine badly).
 Large builds can additionally be spread over several machines with `--shard INDEX/COUNT`: every shard preprocesses its share of the meshes, and a final run without `--shard` links the `--vecset` sources and writes the `.lst` files.
 A mesh that fails preprocessing aborts the build; pass `--skip-failed` to instead drop failing meshes with a warning (the behavior of the original sdf_gen script).
+Watertighting a pathological mesh can also run for hours without ever raising, which stalls an otherwise finished build; `--timeout SECONDS` treats those as failures too.
 
 ```bash
 cod-vae-dataset data/merged \
