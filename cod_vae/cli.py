@@ -4,10 +4,11 @@ Command line entry points.
 cod-vae-convert: convert an official COD-VAE release directory into the self-contained
 npz format (and optionally push it to the Hugging Face Hub).
 
-cod-vae-train: train COD-VAE, either directly on a directory of watertight meshes or
-on a dataset built with cod-vae-dataset. For multi-GPU training with the torch
-backend, launch via ``torchrun --nproc_per_node=<n> -m cod_vae.cli train ...``; the
-jax backend uses all visible GPUs from a single process.
+cod-vae-train: train COD-VAE, either directly on a directory of mesh files
+(preprocessed on the fly with the sdf_gen recipe, so the meshes need not be
+watertight) or on a dataset built with cod-vae-dataset. For multi-GPU training with
+the torch backend, launch via ``torchrun --nproc_per_node=<n> -m cod_vae.cli train
+...``; the jax backend uses all visible GPUs from a single process.
 
 cod-vae-dataset: build a training dataset in the 3DShape2VecSet layout by merging any
 number of sources — directories of (arbitrary, not necessarily watertight) mesh files,
@@ -51,14 +52,15 @@ def convert_main(argv: list[str] | None = None) -> None:
 
 def train_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Train COD-VAE on a directory of watertight meshes or on a "
-        "dataset built with cod-vae-dataset (a root containing ShapeNetV2_point/)."
+        description="Train COD-VAE on a directory of mesh files (preprocessed on the "
+        "fly; requires cod-vae[preprocess]) or on a dataset built with "
+        "cod-vae-dataset (a root containing ShapeNetV2_point/)."
     )
     parser.add_argument(
         "data_dir",
         type=Path,
-        help="directory of watertight mesh files, or a dataset root built with "
-        "cod-vae-dataset",
+        help="directory of mesh files (they need not be watertight), or a dataset "
+        "root built with cod-vae-dataset",
     )
     parser.add_argument("out_dir", type=Path, help="output directory for checkpoints")
     parser.add_argument("--stage", type=int, choices=(1, 2), default=1)

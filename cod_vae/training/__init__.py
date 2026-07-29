@@ -8,7 +8,6 @@ from .config import TrainingConfig
 from .data import (
     MeshOccupancyDataset,
     axis_scaling,
-    compute_occupancy_data,
     iterate_batches,
 )
 from .preprocess import (
@@ -25,7 +24,6 @@ __all__ = [
     "TrainingConfig",
     "axis_scaling",
     "build_vecset_dataset",
-    "compute_occupancy_data",
     "iterate_batches",
     "preprocess_mesh",
 ]

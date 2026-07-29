@@ -1,13 +1,16 @@
 """
 Backend-agnostic training data pipeline.
 
-The reference implementation trains on the preprocessed ShapeNet occupancy data of
-3DShape2VecSet: per shape, a pool of surface points plus volume query points (uniform in
-the [-1, 1] cube) and near-surface query points with ground-truth occupancy labels.
-:func:`compute_occupancy_data` reproduces this preprocessing for arbitrary watertight
-meshes, and :class:`MeshOccupancyDataset` serves random subsamples per training step
-(with the reference's AxisScaling augmentation), as plain numpy dictionaries usable from
-both backends.
+Training items are random subsamples of per-shape occupancy pools: surface points plus
+volume query points (uniform in the [-1, 1] cube) and near-surface query points with
+ground-truth occupancy labels. :class:`MeshOccupancyDataset` computes these pools
+lazily (and optionally disk-cached) from arbitrary meshes — watertight or not — using
+the original authors' sdf_gen preprocessing
+(:func:`cod_vae.training.preprocess.preprocess_mesh`), and serves random subsamples
+per training step (with the reference's AxisScaling augmentation) as plain numpy
+dictionaries usable from both backends. The exact same preprocessing run ahead of time
+is available via ``cod-vae-dataset``, whose output is served by
+:class:`cod_vae.training.ShapeNetVecSetDataset` with the same item interface.
 """
 
 from __future__ import annotations
@@ -19,61 +22,13 @@ from typing import Callable, Sequence
 import numpy as np
 import trimesh
 
-from ..mesh import normalize_to_cube, sample_surface_points
+from .preprocess import SdfGenSettings, preprocess_mesh
 
 __all__ = [
-    "compute_occupancy_data",
     "axis_scaling",
     "MeshOccupancyDataset",
     "iterate_batches",
 ]
-
-
-def compute_occupancy_data(
-    mesh: trimesh.Trimesh,
-    num_surface: int = 100_000,
-    num_vol: int = 100_000,
-    num_near: int = 100_000,
-    near_stddevs: Sequence[float] = (0.01, 0.02),
-    object_scale: float = 0.9,
-    seed: int = 0,
-) -> dict[str, np.ndarray]:
-    """
-    Normalize a watertight mesh into the [-1, 1] cube and build pools of surface points,
-    uniform volume query points, and near-surface query points (surface samples plus
-    Gaussian noise with the given standard deviations) with occupancy labels.
-    """
-    normalized, _ = normalize_to_cube(mesh, object_scale)
-    rng = np.random.default_rng(seed)
-    surface = sample_surface_points(
-        normalized, num_surface, seed=int(rng.integers(2**31))
-    )
-    vol_points = rng.uniform(-1.0, 1.0, (num_vol, 3)).astype(np.float32)
-    near_base = sample_surface_points(
-        normalized, num_near, seed=int(rng.integers(2**31))
-    )
-    stddevs = np.asarray(near_stddevs, dtype=np.float32)
-    per_point_std = stddevs[np.arange(num_near) % len(stddevs), None]
-    near_points = (
-        near_base
-        + rng.standard_normal((num_near, 3)).astype(np.float32) * per_point_std
-    )
-    near_points = np.clip(near_points, -1.0, 1.0)
-    if not normalized.is_watertight:
-        raise ValueError(
-            "Occupancy labels require a watertight mesh; got a non-watertight mesh. "
-            "For arbitrary meshes, build a dataset with cod-vae-dataset instead, "
-            "which makes meshes watertight automatically."
-        )
-    vol_label = normalized.contains(vol_points).astype(np.float32)
-    near_label = normalized.contains(near_points).astype(np.float32)
-    return {
-        "surface": surface,
-        "vol_points": vol_points,
-        "vol_label": vol_label,
-        "near_points": near_points,
-        "near_label": near_label,
-    }
 
 
 def axis_scaling(
@@ -103,10 +58,14 @@ def axis_scaling(
 
 class MeshOccupancyDataset:
     """
-    Training dataset over a set of watertight meshes.
+    Training dataset over a set of meshes, which do not need to be watertight (the
+    preprocessing repairs them automatically; requires the ``cod-vae[preprocess]``
+    extra).
 
     Every item is a random subsample of the (lazily computed, optionally disk-cached)
-    occupancy pools of one mesh:
+    occupancy pools of one mesh, generated with the sdf_gen preprocessing of
+    :func:`cod_vae.training.preprocess.preprocess_mesh` (parameterized via
+    ``settings``):
 
     - "surface": (pc_size, 3) surface point cloud,
     - "queries": (num_vol_queries + num_near_queries, 3) query points (volume first),
@@ -133,7 +92,7 @@ class MeshOccupancyDataset:
         repeat: int = 1,
         cache_dir: Path | str | None = None,
         seed: int = 0,
-        **pool_kwargs,
+        settings: SdfGenSettings | None = None,
     ):
         if callable(meshes):
             if num_meshes is None:
@@ -156,7 +115,7 @@ class MeshOccupancyDataset:
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.seed = seed
         self.epoch = 0
-        self.pool_kwargs = pool_kwargs
+        self.settings = settings if settings is not None else SdfGenSettings()
         self._pools: dict[int, dict[str, np.ndarray]] = {}
 
     def set_epoch(self, epoch: int) -> None:
@@ -170,15 +129,15 @@ class MeshOccupancyDataset:
             return self._pools[mesh_index]
         cache_path = None
         if self.cache_dir is not None:
-            settings = repr(sorted(self.pool_kwargs.items())).encode()
-            tag = hashlib.sha1(settings).hexdigest()[:8]
+            tag = hashlib.sha1(repr(self.settings).encode()).hexdigest()[:8]
             cache_path = self.cache_dir / f"occupancy_{mesh_index:06d}_{tag}.npz"
             if cache_path.exists():
                 data = dict(np.load(cache_path))
                 self._pools[mesh_index] = data
                 return data
-        data = compute_occupancy_data(
-            self._get_mesh(mesh_index), seed=self.seed + mesh_index, **self.pool_kwargs
+        mesh = self._get_mesh(mesh_index)
+        data = preprocess_mesh(
+            mesh.vertices, mesh.faces, self.settings, seed=self.seed + mesh_index
         )
         if cache_path is not None:
             cache_path.parent.mkdir(parents=True, exist_ok=True)

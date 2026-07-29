@@ -22,7 +22,7 @@ Download it following the instructions in the 3DShape2VecSet repository and arra
 `cod_vae.training.ShapeNetVecSetDataset` reads this layout directly — no HDF5 conversion step is needed.
 Per training sample it draws 2048 surface points and 4096 volume + 4096 near-surface queries and applies the reference's anisotropic scaling augmentation, matching the original data pipeline.
 
-> **Training on your own data instead:** if you do not need ShapeNet, `cod_vae.training.MeshOccupancyDataset` computes the same kind of occupancy pools directly from arbitrary watertight meshes (see section 5).
+> **Training on your own data instead:** if you do not need ShapeNet, `cod_vae.training.MeshOccupancyDataset` computes the same kind of occupancy pools on the fly from arbitrary meshes, using the same sdf_gen preprocessing (see section 5).
 
 ### Custom and mixed datasets
 
@@ -92,8 +92,8 @@ A quick qualitative check: encode and decode a few validation shapes (`ShapeNetV
 
 ## 5. Training from Python
 
-The CLI is a thin wrapper around the Python API; both data options plug into the same `train` functions.
-Directly on watertight meshes, with the occupancy pools computed on the fly (and optionally cached):
+The CLI is a thin wrapper around the Python API; both data options plug into the same `train` functions and use the same sdf_gen preprocessing.
+Directly on meshes (watertight or not), with the occupancy pools computed on the fly (and optionally cached; pass `settings=SdfGenSettings(...)` to adjust the preprocessing):
 
 ```python
 from cod_vae import CODVAEConfig

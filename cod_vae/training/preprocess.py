@@ -86,7 +86,13 @@ def preprocess_mesh(
     Returns "surface", "vol_points", "vol_label", "near_points", and "near_label"
     (occupancy: 1 inside, 0 outside), all float32 and in the same normalized frame.
     """
-    import point_cloud_utils as pcu
+    try:
+        import point_cloud_utils as pcu
+    except ImportError as exc:
+        raise ImportError(
+            "Mesh preprocessing requires point-cloud-utils; install it via "
+            "pip install cod-vae[preprocess]"
+        ) from exc
 
     if settings is None:
         settings = SdfGenSettings()

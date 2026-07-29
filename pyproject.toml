@@ -29,7 +29,7 @@ train = ["optax"]
 hub = ["huggingface_hub"]
 convert = ["torch", "pyyaml"]
 preprocess = ["point-cloud-utils", "datasets"]
-tests = ["pytest"]
+tests = ["pytest", "point-cloud-utils"]
 all = ["torch", "jax[cuda12]", "optax", "huggingface_hub", "pyyaml", "point-cloud-utils", "datasets", "pytest"]
 
 [project.scripts]

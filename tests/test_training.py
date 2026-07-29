@@ -15,7 +15,10 @@ import trimesh
 
 from cod_vae import CODVAEConfig
 from cod_vae.init import LATENT_PREFIXES
-from cod_vae.training import MeshOccupancyDataset, TrainingConfig
+from cod_vae.training import MeshOccupancyDataset, SdfGenSettings, TrainingConfig
+
+# Mesh-based training preprocesses with the sdf_gen recipe, which needs pcu.
+pytest.importorskip("point_cloud_utils")
 
 
 @pytest.fixture(scope="module")
@@ -30,9 +33,9 @@ def dataset():
         num_vol_queries=128,
         num_near_queries=128,
         repeat=8,
-        num_surface=2000,
-        num_vol=2000,
-        num_near=2000,
+        settings=SdfGenSettings(
+            num_vol=2000, num_surface=1000, watertight_resolution=1000
+        ),
     )
 
 
@@ -146,7 +149,9 @@ def test_torch_ddp_cpu(tiny_config, dataset, tmp_path):
             """
             import trimesh
             from cod_vae import CODVAEConfig, init_params
-            from cod_vae.training import MeshOccupancyDataset, TrainingConfig
+            from cod_vae.training import (
+                MeshOccupancyDataset, SdfGenSettings, TrainingConfig,
+            )
             from cod_vae.torch.training import train
 
             config = CODVAEConfig(
@@ -159,7 +164,9 @@ def test_torch_ddp_cpu(tiny_config, dataset, tmp_path):
             meshes = [trimesh.creation.box(extents=[1.0, 0.6, 0.4])] * 4
             dataset = MeshOccupancyDataset(
                 meshes, pc_size=128, num_vol_queries=64, num_near_queries=64,
-                num_surface=1000, num_vol=1000, num_near=1000,
+                settings=SdfGenSettings(
+                    num_vol=1000, num_surface=500, watertight_resolution=1000,
+                ),
             )
             train_config = TrainingConfig(stage=1, epochs=1, batch_size=1, log_every=1)
             train(config, train_config, dataset, device="cpu", out_dir="OUT_DIR")
@@ -196,7 +203,9 @@ def test_jax_multi_device_cpu(tmp_path):
             import jax, trimesh
             assert jax.device_count() == 2, jax.devices()
             from cod_vae import CODVAEConfig
-            from cod_vae.training import MeshOccupancyDataset, TrainingConfig
+            from cod_vae.training import (
+                MeshOccupancyDataset, SdfGenSettings, TrainingConfig,
+            )
             from cod_vae.jax.training import train
 
             config = CODVAEConfig(
@@ -209,7 +218,9 @@ def test_jax_multi_device_cpu(tmp_path):
             meshes = [trimesh.creation.box(extents=[1.0, 0.6, 0.4])] * 4
             dataset = MeshOccupancyDataset(
                 meshes, pc_size=128, num_vol_queries=64, num_near_queries=64,
-                num_surface=1000, num_vol=1000, num_near=1000,
+                settings=SdfGenSettings(
+                    num_vol=1000, num_surface=500, watertight_resolution=1000,
+                ),
             )
             train_config = TrainingConfig(stage=1, epochs=1, batch_size=1, log_every=1)
             train(config, train_config, dataset)

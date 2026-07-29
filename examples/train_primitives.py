@@ -18,7 +18,7 @@ from pathlib import Path
 import trimesh
 
 from cod_vae import CODVAE, CODVAEConfig
-from cod_vae.training import MeshOccupancyDataset, TrainingConfig
+from cod_vae.training import MeshOccupancyDataset, SdfGenSettings, TrainingConfig
 
 
 def main() -> None:
@@ -54,10 +54,10 @@ def main() -> None:
         pc_size=1024,
         num_vol_queries=1024,
         num_near_queries=1024,
-        num_surface=50_000,
-        num_vol=50_000,
-        num_near=50_000,
         repeat=16,
+        settings=SdfGenSettings(
+            num_vol=50_000, num_surface=25_000, watertight_resolution=10_000
+        ),
     )
     print("Precomputing occupancy pools...")
     dataset.precompute(verbose=True)
