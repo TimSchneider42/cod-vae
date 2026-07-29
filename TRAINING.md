@@ -22,7 +22,17 @@ Download it following the instructions in the 3DShape2VecSet repository and arra
 `cod_vae.training.ShapeNetVecSetDataset` reads this layout directly — no HDF5 conversion step is needed.
 Per training sample it draws 2048 surface points and 4096 volume + 4096 near-surface queries and applies the reference's anisotropic scaling augmentation, matching the original data pipeline.
 
-> **Training on your own data instead:** if you do not need ShapeNet, `cod_vae.training.MeshOccupancyDataset` computes the same kind of occupancy pools directly from arbitrary watertight meshes (see README).
+> **Training on your own data instead:** if you do not need ShapeNet, `cod_vae.training.MeshOccupancyDataset` computes the same kind of occupancy pools directly from arbitrary watertight meshes (see section 5).
+
+### Custom and mixed datasets
+
+The `cod-vae-dataset` tool (see README, "Option 2: building a dataset with cod-vae-dataset") builds a dataset in exactly this layout from any mix of preprocessed 3DShape2VecSet roots, directories of (not necessarily watertight) mesh files, and Hugging Face mesh datasets in the [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) format, applying the original authors' [sdf_gen](https://github.com/1zb/sdf_gen) preprocessing to the meshes:
+
+```bash
+cod-vae-dataset {root_dir} --vecset path/to/shapenet_vecset_root --meshes path/to/my_meshes --hf TimSchneider42/tactile-mnist-mnist3d --workers 16
+```
+
+The rest of this guide applies unchanged to such a merged `{root_dir}`.
 
 ## 2. Stage 1 — autoencoder
 
@@ -79,6 +89,34 @@ vae.push_to_hub("you/cod-vae-m32")  # weights you trained yourself are yours to 
 ```
 
 A quick qualitative check: encode and decode a few validation shapes (`ShapeNetVecSetDataset(root_dir, split="val")` provides surface points and labeled queries, so occupancy accuracy/IoU can be computed by comparing `vae.decode(latents, queries) > 0` against the labels).
+
+## 5. Training from Python
+
+The CLI is a thin wrapper around the Python API; both data options plug into the same `train` functions.
+Directly on watertight meshes, with the occupancy pools computed on the fly (and optionally cached):
+
+```python
+from cod_vae import CODVAEConfig
+from cod_vae.training import MeshOccupancyDataset, TrainingConfig
+from cod_vae.torch.training import train  # or: from cod_vae.jax.training import train
+
+config = CODVAEConfig()  # architecture of the released vae_m32
+dataset = MeshOccupancyDataset(mesh_files, repeat=16, cache_dir="occupancy_cache")
+
+params = train(config, TrainingConfig(stage=1), dataset, out_dir="checkpoints/stage1")
+params = train(config, TrainingConfig(stage=2), dataset, params=params, out_dir="checkpoints/stage2")
+```
+
+On preprocessed data — a dataset built with `cod-vae-dataset` or the original authors' ShapeNet root — only the dataset class changes; everything else stays the same:
+
+```python
+from cod_vae.training import ShapeNetVecSetDataset
+
+dataset = ShapeNetVecSetDataset("data/merged", split="train", repeat=16)
+```
+
+Here no caching is needed (the pools are read straight from disk), `categories=[...]` restricts training to a subset of the merged sources, and `split="val"`/`"test"` instantiates held-out splits for evaluation.
+In both cases the resulting `params` are a flat numpy dict compatible with both backends (`CODVAE(config, params)`, `save_npz`, `push_to_hub`).
 
 ## Known differences from the reference training
 
