@@ -48,9 +48,29 @@ def main() -> None:
         default=None,
         help="gradient accumulation steps (default: 2 for stage 1, 1 for stage 2)",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=16,
+        help="how often the dataset is repeated per epoch (the reference uses 16)",
+    )
     parser.add_argument("--seed", type=int, default=123456)
     parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="continue an interrupted run from the last completed epoch in out_dir "
+        "(torch backend)",
+    )
+    parser.add_argument(
+        "--tf32",
+        action="store_true",
+        help="allow TF32 matmuls/convolutions on Ampere+ GPUs: faster than float32 "
+        "and still more precise than the reference's 16-mixed precision (torch backend)",
+    )
     args = parser.parse_args()
+    if (args.resume or args.tf32) and args.backend != "torch":
+        parser.error("--resume and --tf32 are only supported by the torch backend")
 
     params = None
     if args.init_from is not None:
@@ -68,16 +88,21 @@ def main() -> None:
         seed=args.seed,
     )
     dataset = ShapeNetVecSetDataset(
-        args.root_dir, split="train", repeat=16, seed=args.seed
+        args.root_dir, split="train", repeat=args.repeat, seed=args.seed
     )
     print(
         f"Stage {args.stage} on {len(dataset)} samples/epoch "
-        f"({len(dataset.items)} shapes x repeat 16)"
+        f"({len(dataset.items)} shapes x repeat {args.repeat})"
     )
 
     if args.backend == "torch":
+        import torch
+
         from cod_vae.torch.training import train
 
+        if args.tf32:
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         train(
             config,
             train_config,
@@ -85,6 +110,7 @@ def main() -> None:
             params=params,
             out_dir=args.out_dir,
             num_workers=args.num_workers,
+            resume=args.resume,
         )
     else:
         from cod_vae.jax.training import train

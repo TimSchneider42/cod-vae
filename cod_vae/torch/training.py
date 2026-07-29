@@ -19,7 +19,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 
-from ..checkpoint import Params, save_npz
+from ..checkpoint import Params, load_npz, save_npz
 from ..config import CODVAEConfig
 from ..init import LATENT_PREFIXES, init_params
 from ..training.config import TrainingConfig
@@ -146,6 +146,7 @@ def train(
     out_dir: Path | str | None = None,
     device: str | None = None,
     num_workers: int = 0,
+    resume: bool = False,
 ) -> Params:
     """
     Train COD-VAE and return the resulting parameters as a flat numpy dict.
@@ -153,7 +154,10 @@ def train(
     For stage 2, ``params`` must contain the trained stage-1 autoencoder weights (all
     parameters are loaded; the autoencoder is frozen). If ``out_dir`` is given, a
     checkpoint ("checkpoint_epoch_*.npz" and "checkpoint_last.npz") is written after
-    every epoch. Runs under torchrun for multi-GPU data parallelism.
+    every epoch, together with the optimizer state ("train_state_last.pt"); with
+    ``resume``, training continues from that state instead of starting over, which is
+    what an interrupted run (job time limit, node failure) needs. Runs under torchrun
+    for multi-GPU data parallelism.
     """
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if distributed and not torch.distributed.is_initialized():
@@ -204,6 +208,27 @@ def train(
             gamma=train_config.lr_decay,
         )
 
+    start_epoch = 0
+    if resume and out_dir is not None:
+        state_path = Path(out_dir) / "train_state_last.pt"
+        if state_path.exists():
+            state = torch.load(state_path, map_location="cpu", weights_only=True)
+            # The state refers to the per-epoch checkpoint written just before it, so a
+            # crash while writing "checkpoint_last.npz" cannot make the two disagree.
+            checkpoint = Path(out_dir) / f"checkpoint_epoch_{state['epoch']:04d}.npz"
+            module.load_state_dict(
+                {
+                    key: torch.from_numpy(value.copy())
+                    for key, value in load_npz(checkpoint)[1].items()
+                }
+            )
+            optimizer.load_state_dict(state["optimizer"])
+            if scheduler is not None and state["scheduler"] is not None:
+                scheduler.load_state_dict(state["scheduler"])
+            start_epoch = state["epoch"] + 1
+            if rank == 0:
+                print(f"resuming from {checkpoint} at epoch {start_epoch}")
+
     sampler = (
         DistributedSampler(dataset, seed=train_config.seed) if distributed else None
     )
@@ -216,7 +241,7 @@ def train(
         num_workers=num_workers,
     )
 
-    for epoch in range(train_config.epochs):
+    for epoch in range(start_epoch, train_config.epochs):
         dataset.set_epoch(epoch)
         if sampler is not None:
             sampler.set_epoch(epoch)
@@ -247,6 +272,16 @@ def train(
             result = _module_params(module)
             save_npz(out_dir / f"checkpoint_epoch_{epoch:04d}.npz", config, result)
             save_npz(out_dir / "checkpoint_last.npz", config, result)
+            state = {
+                "epoch": epoch,
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            }
+            # Written last and renamed atomically: a "train_state_last.pt" that exists
+            # always belongs to a complete checkpoint.
+            state_tmp = out_dir / "train_state_last.pt.tmp"
+            torch.save(state, state_tmp)
+            state_tmp.rename(out_dir / "train_state_last.pt")
         if distributed:
             torch.distributed.barrier()
 
