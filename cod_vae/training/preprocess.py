@@ -62,6 +62,17 @@ DEFAULT_SPLIT_MAP = {
 }
 
 
+def _require_point_cloud_utils():
+    try:
+        import point_cloud_utils
+    except ImportError as exc:
+        raise ImportError(
+            "Mesh preprocessing requires point-cloud-utils; install it via "
+            "pip install cod-vae[preprocess]"
+        ) from exc
+    return point_cloud_utils
+
+
 @dataclass(frozen=True)
 class SdfGenSettings:
     """Parameters of the sdf_gen preprocessing; defaults match preprocess/box.py."""
@@ -87,13 +98,7 @@ def preprocess_mesh(
     Returns "surface", "vol_points", "vol_label", "near_points", and "near_label"
     (occupancy: 1 inside, 0 outside), all float32 and in the same normalized frame.
     """
-    try:
-        import point_cloud_utils as pcu
-    except ImportError as exc:
-        raise ImportError(
-            "Mesh preprocessing requires point-cloud-utils; install it via "
-            "pip install cod-vae[preprocess]"
-        ) from exc
+    pcu = _require_point_cloud_utils()
 
     if settings is None:
         settings = SdfGenSettings()
@@ -225,6 +230,15 @@ def merge_vecset_root(
                 f"{src_root} is not a preprocessed vecset root: "
                 f"{src_root / sub} is missing"
             )
+    missing_surface = sorted(
+        p.name
+        for p in (src_root / POINT_DIR).iterdir()
+        if p.is_dir() and not (src_root / SURFACE_DIR / p.name).is_dir()
+    )
+    if missing_surface:
+        raise FileNotFoundError(
+            f"{src_root} is missing surface data for categories {missing_surface}"
+        )
 
     if fraction >= 1.0:
         categories: list[str] = []
@@ -400,14 +414,17 @@ def _run_category(
     total: int,
     lst: Mapping[str, list[str]],
     workers: int,
+    skip_failed: bool,
     verbose: bool,
 ) -> dict[str, list[str]]:
     """
     Run ``total`` preprocessing tasks of one category (in ``workers`` parallel
-    processes if requested) with a progress bar, drop objects whose preprocessing
-    failed, and write the category's train/val/test .lst files. ``tasks`` may be a
-    lazy iterable — it is consumed incrementally, so sources can stream mesh data
-    instead of materializing it up front. Returns the surviving object ids per split.
+    processes if requested) with a progress bar and write the category's
+    train/val/test .lst files. A failing mesh aborts the run unless ``skip_failed``
+    is set, in which case it is reported and dropped (missing dependencies always
+    abort). ``tasks`` may be a lazy iterable — it is consumed incrementally, so
+    sources can stream mesh data instead of materializing it up front. Returns the
+    surviving object ids per split.
     """
     failed: set[str] = set()
     skipped = sum(len(ids) for ids in lst.values()) - total
@@ -416,6 +433,14 @@ def _run_category(
     bar = _progress_bar(total, category, "mesh", verbose)
 
     def handle_failure(object_id: str, exc: BaseException) -> None:
+        if isinstance(exc, ImportError):
+            # A missing dependency is not a per-mesh problem; always abort.
+            raise exc
+        if not skip_failed:
+            raise RuntimeError(
+                f"[{category}] preprocessing of {object_id} failed: {exc} "
+                f"(pass --skip-failed to drop failing meshes instead of aborting)"
+            ) from exc
         failed.add(object_id)
         message = f"[{category}] {object_id}: preprocessing failed ({exc}); dropping"
         if bar is not None:
@@ -432,24 +457,28 @@ def _run_category(
     try:
         if workers > 0:
             with ProcessPoolExecutor(max_workers=workers) as pool:
-                pending = {}
-                queue = iter(tasks)
-                done_count = 0
-                while pending or done_count < total:
-                    while len(pending) < 2 * workers:
-                        task = next(queue, None)
-                        if task is None:
+                try:
+                    pending = {}
+                    queue = iter(tasks)
+                    done_count = 0
+                    while pending or done_count < total:
+                        while len(pending) < 2 * workers:
+                            task = next(queue, None)
+                            if task is None:
+                                break
+                            pending[pool.submit(_process_object, task)] = task[2]
+                        if not pending:
                             break
-                        pending[pool.submit(_process_object, task)] = task[2]
-                    if not pending:
-                        break
-                    finished, _ = wait(pending, return_when=FIRST_COMPLETED)
-                    for future in finished:
-                        object_id = pending.pop(future)
-                        done_count += 1
-                        if future.exception() is not None:
-                            handle_failure(object_id, future.exception())
-                        advance(object_id, done_count)
+                        finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                        for future in finished:
+                            object_id = pending.pop(future)
+                            done_count += 1
+                            if future.exception() is not None:
+                                handle_failure(object_id, future.exception())
+                            advance(object_id, done_count)
+                except BaseException:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
         else:
             for done_count, task in enumerate(tasks, start=1):
                 try:
@@ -461,6 +490,12 @@ def _run_category(
         if bar is not None:
             bar.close()
 
+    if failed:
+        print(
+            f"[{category}] dropped {len(failed)} of {total} objects due to "
+            f"preprocessing failures",
+            file=sys.stderr,
+        )
     lst = {
         split: [object_id for object_id in ids if object_id not in failed]
         for split, ids in lst.items()
@@ -483,6 +518,7 @@ def add_mesh_dir_source(
     workers: int = 0,
     overwrite: bool = False,
     fraction: float = 1.0,
+    skip_failed: bool = False,
     verbose: bool = True,
 ) -> dict[str, list[str]]:
     """
@@ -495,10 +531,12 @@ def add_mesh_dir_source(
     keep their position in the full file list, so a mesh's outputs are identical
     across fractions. Existing outputs are reused (skipped) unless ``overwrite`` is
     set, so an interrupted run can be resumed as long as the source directory is
-    unchanged. Failed meshes are reported and dropped. Returns the object ids per
-    split, which are also written to the category's .lst files.
+    unchanged. A failing mesh aborts the run unless ``skip_failed`` is set, in which
+    case it is reported and dropped. Returns the object ids per split, which are also
+    written to the category's .lst files.
     """
     out_root, mesh_dir = Path(out_root), Path(mesh_dir)
+    _require_point_cloud_utils()
     if settings is None:
         settings = SdfGenSettings()
     _check_category_free(out_root, category)
@@ -553,7 +591,9 @@ def add_mesh_dir_source(
                     extras,
                 )
             )
-    return _run_category(out_root, category, tasks, len(tasks), lst, workers, verbose)
+    return _run_category(
+        out_root, category, tasks, len(tasks), lst, workers, skip_failed, verbose
+    )
 
 
 def add_hf_source(
@@ -566,6 +606,7 @@ def add_hf_source(
     workers: int = 0,
     overwrite: bool = False,
     fraction: float = 1.0,
+    skip_failed: bool = False,
     verbose: bool = True,
 ) -> dict[str, list[str]]:
     """
@@ -574,12 +615,13 @@ def add_hf_source(
     source split (seeded by ``seed``) is preprocessed; object ids keep their row index
     in the full split, so a row's outputs are identical across fractions. Existing
     outputs are reused (skipped) unless ``overwrite`` is set, so an interrupted run
-    can be resumed. Meshes that fail preprocessing (e.g. watertighting) are reported
-    and dropped, as in the reference script. With ``workers > 0``, meshes are
-    processed in that many parallel processes. Returns the object ids per split, which
+    can be resumed. A mesh that fails preprocessing (e.g. watertighting) aborts the
+    run unless ``skip_failed`` is set, in which case it is reported and dropped (as in
+    the reference script). With ``workers > 0``, meshes are processed in that many parallel processes. Returns the object ids per split, which
     are also written to the category's train/val/test .lst files.
     """
     out_root = Path(out_root)
+    _require_point_cloud_utils()
     if settings is None:
         settings = SdfGenSettings()
     if verbose:
@@ -629,7 +671,7 @@ def add_hf_source(
             )
 
     return _run_category(
-        out_root, category, tasks(), len(pending), lst, workers, verbose
+        out_root, category, tasks(), len(pending), lst, workers, skip_failed, verbose
     )
 
 
@@ -644,6 +686,7 @@ def build_vecset_dataset(
     seed: int = 0,
     workers: int = 0,
     overwrite: bool = False,
+    skip_failed: bool = False,
     verbose: bool = True,
 ) -> None:
     """
@@ -695,6 +738,7 @@ def build_vecset_dataset(
             workers=workers,
             overwrite=overwrite,
             fraction=fraction,
+            skip_failed=skip_failed,
             verbose=verbose,
         )
         report(mesh_dir, fraction, name, lst)
@@ -709,6 +753,7 @@ def build_vecset_dataset(
             workers=workers,
             overwrite=overwrite,
             fraction=fraction,
+            skip_failed=skip_failed,
             verbose=verbose,
         )
         report(dataset, fraction, name, lst)

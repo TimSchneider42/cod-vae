@@ -209,6 +209,47 @@ def test_mesh_dir_source(tmp_path):
         add_mesh_dir_source(tmp_path / "other", "toy2", mesh_dir)
 
 
+def test_failures_abort_by_default(tmp_path, monkeypatch):
+    from cod_vae.training import preprocess as pp
+
+    mesh_dir = tmp_path / "meshes"
+    mesh_dir.mkdir()
+    trimesh.creation.box(extents=[1.0, 0.6, 0.4]).export(mesh_dir / "box.stl")
+
+    def boom(*args, **kwargs):
+        raise ValueError("bad geometry")
+
+    monkeypatch.setattr(pp, "preprocess_mesh", boom)
+    with pytest.raises(RuntimeError, match="train_000000"):
+        pp.add_mesh_dir_source(tmp_path / "out1", "toy", mesh_dir, verbose=False)
+
+    # Opt-in skipping restores the reference script's drop-with-warning behavior.
+    lst = pp.add_mesh_dir_source(
+        tmp_path / "out2", "toy", mesh_dir, skip_failed=True, verbose=False
+    )
+    assert lst["train"] == []
+
+    # A missing dependency is never skippable.
+    def missing(*args, **kwargs):
+        raise ImportError("point-cloud-utils is not installed")
+
+    monkeypatch.setattr(pp, "preprocess_mesh", missing)
+    with pytest.raises(ImportError):
+        pp.add_mesh_dir_source(
+            tmp_path / "out3", "toy", mesh_dir, skip_failed=True, verbose=False
+        )
+
+
+def test_vecset_root_missing_surface_fails(tmp_path):
+    from cod_vae.training.preprocess import merge_vecset_root
+
+    root = tmp_path / "root"
+    (root / "ShapeNetV2_point" / "cat").mkdir(parents=True)
+    (root / "ShapeNetV2_surface").mkdir()
+    with pytest.raises(FileNotFoundError, match="surface"):
+        merge_vecset_root(root, tmp_path / "out")
+
+
 def test_subsampling(tmp_path, hf_dataset_dir, vecset_source_dir):
     from cod_vae.cli import dataset_main
     from cod_vae.training.preprocess import _subsample

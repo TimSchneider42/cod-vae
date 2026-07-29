@@ -99,6 +99,7 @@ Checkpoints are self-contained npz files loadable by both backends (and by `CODV
 
 Every source accepts an optional `:FRACTION` suffix (e.g. `--hf TimSchneider42/tactile-mnist-mnist3d:0.1`) to keep only a deterministic random subsample of each split; the selection is controlled by `--seed` (default 0), so the same command always yields the same subset.
 Preprocessing is resumable (existing outputs are skipped unless `--overwrite` is given) and parallelizes with `--workers`.
+A mesh that fails preprocessing aborts the build; pass `--skip-failed` to instead drop failing meshes with a warning (the behavior of the original sdf_gen script).
 
 ```bash
 cod-vae-dataset data/merged \

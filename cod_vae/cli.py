@@ -237,6 +237,12 @@ def dataset_main(argv: list[str] | None = None) -> None:
         help="recompute existing outputs instead of resuming",
     )
     parser.add_argument(
+        "--skip-failed",
+        action="store_true",
+        help="drop meshes whose preprocessing fails (with a warning) instead of "
+        "aborting the build",
+    )
+    parser.add_argument(
         "--num-vol", type=int, default=250_000, help="volume query pool size"
     )
     parser.add_argument(
@@ -269,6 +275,7 @@ def dataset_main(argv: list[str] | None = None) -> None:
             try:
                 fraction = float(tail)
             except ValueError:
+                # Not a number: the colon is part of the path, not a fraction suffix.
                 pass
             else:
                 if not 0 < fraction <= 1:
@@ -316,6 +323,7 @@ def dataset_main(argv: list[str] | None = None) -> None:
         seed=args.seed,
         workers=args.workers,
         overwrite=args.overwrite,
+        skip_failed=args.skip_failed,
     )
     print(f"Dataset written to {args.out_dir}")
 
