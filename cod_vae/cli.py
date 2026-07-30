@@ -279,11 +279,12 @@ def dataset_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--object-scale", type=float, default=0.9)
     parser.add_argument("--watertight-resolution", type=int, default=50_000)
     parser.add_argument(
-        "--skip-watertight-when-closed",
+        "--watertight-closed-meshes",
         action="store_true",
-        help="leave meshes that already bound a volume untouched instead of remeshing "
-        "them: their occupancy is exact as they are, and the watertighting can take "
-        "seconds per mesh (or, on some inputs, never finish)",
+        help="run the watertighting on every mesh, as the reference script does, "
+        "instead of only on those that do not already bound a volume. It is a repair "
+        "step: on a closed mesh it changes nothing about the occupancy, only resamples "
+        "the surface onto an octree (and on some inputs never finishes)",
     )
     args = parser.parse_args(argv)
 
@@ -343,7 +344,7 @@ def dataset_main(argv: list[str] | None = None) -> None:
         near_stddevs=tuple(args.near_stddev or (0.005, 0.05)),
         object_scale=args.object_scale,
         watertight_resolution=args.watertight_resolution,
-        skip_watertight_when_closed=args.skip_watertight_when_closed,
+        watertight_closed_meshes=args.watertight_closed_meshes,
     )
     build_vecset_dataset(
         args.out_dir,

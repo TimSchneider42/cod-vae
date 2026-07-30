@@ -86,12 +86,12 @@ class SdfGenSettings:
     near_stddevs: tuple[float, ...] = (0.005, 0.05)
     object_scale: float = 0.9
     watertight_resolution: int = 50_000
-    # Meshes that are already closed need no watertighting: the occupancy of a closed
-    # surface is exact without it, and the step is not a repair but a remesh onto an
-    # octree (it turns 3.5k vertices into 77k and costs seconds per mesh). Off by
-    # default, because it changes the surface sampling for datasets that are already
-    # clean -- and because the reference recipe applies the step unconditionally.
-    skip_watertight_when_closed: bool = False
+    # Watertighting is a repair, and a mesh that already bounds a volume needs none: its
+    # occupancy is exact as it is, while the step would resample the surface onto an
+    # octree (turning 3.5k vertices into 77k, at seconds per mesh, and rounding sharp
+    # features to the octree resolution). It is therefore applied only where it is
+    # needed. Set this to run it unconditionally, as the reference script does.
+    watertight_closed_meshes: bool = False
 
 
 def is_closed_mesh(vertices: np.ndarray, faces: np.ndarray) -> bool:
@@ -113,13 +113,13 @@ def preprocess_mesh(
     seed: int = 0,
 ) -> dict[str, np.ndarray]:
     """
-    Apply the sdf_gen preprocessing to a single mesh: watertighting (skipped for
-    already closed meshes if ``settings.skip_watertight_when_closed``), normalization
-    into the [-1, 1] cube, and sampling of the surface / volume / near-surface pools. The
-    near-surface pool has ``num_surface * len(near_stddevs)`` points (the surface
-    samples perturbed once per standard deviation, as in the reference script).
-    Returns "surface", "vol_points", "vol_label", "near_points", and "near_label"
-    (occupancy: 1 inside, 0 outside), all float32 and in the same normalized frame.
+    Apply the sdf_gen preprocessing to a single mesh: watertighting where the mesh needs
+    it, normalization into the [-1, 1] cube, and sampling of the surface / volume /
+    near-surface pools. The near-surface pool has ``num_surface * len(near_stddevs)``
+    points (the surface samples perturbed once per standard deviation, as in the
+    reference script). Returns "surface", "vol_points", "vol_label", "near_points", and
+    "near_label" (occupancy: 1 inside, 0 outside), all float32 and in the same
+    normalized frame.
     """
     pcu = _require_point_cloud_utils()
 
@@ -128,7 +128,7 @@ def preprocess_mesh(
     rng = np.random.default_rng(seed)
     vertices = np.asarray(vertices, dtype=np.float64)
     faces = np.ascontiguousarray(faces, dtype=np.int32)
-    if settings.skip_watertight_when_closed and is_closed_mesh(vertices, faces):
+    if not settings.watertight_closed_meshes and is_closed_mesh(vertices, faces):
         vw, fw = vertices, faces
     else:
         vw, fw = pcu.make_mesh_watertight(
@@ -775,9 +775,7 @@ def add_hf_source(
                     f"mesh dataset in the Tactile MNIST format"
                 )
         indices = _shard(
-            _subsample(
-                list(range(len(ds))), fraction, seed, f"{category}/{src_split}"
-            ),
+            _subsample(list(range(len(ds))), fraction, seed, f"{category}/{src_split}"),
             shard,
             num_shards,
         )

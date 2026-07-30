@@ -176,7 +176,9 @@ class ShapeNetVecSetDataset:
         return len(self.items) * self.repeat
 
     @staticmethod
-    def _start(rng: np.random.Generator, total: int, count: int, offset: int = 0) -> int:
+    def _start(
+        rng: np.random.Generator, total: int, count: int, offset: int = 0
+    ) -> int:
         """Start of a random block of ``count`` rows within ``total`` rows."""
         if count > total:
             raise ValueError(f"Cannot draw {count} points from a pool of {total}")

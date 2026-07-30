@@ -59,6 +59,14 @@ volume = vae.decode_volume(latents, resolution=128)  # dense logit grid
 
 Models can be loaded from a Hugging Face Hub repo id, a local npz file, or an official COD-VAE release directory (`config.yaml` + `*.pt`, requires the `convert` extra), and saved/uploaded via `vae.save(path)` and `vae.push_to_hub("user/repo")`.
 
+To convert an official release into the self-contained npz format (optionally uploading it):
+
+```bash
+cod-vae-convert path/to/vae_m32 vae_m32.npz --push-to-hub user/cod-vae
+```
+
+Note that the original authors have not attached a license to their released weights, so make sure you have their permission before re-hosting converted weights publicly.
+
 ### Pretrained models
 
 A grid of models trained with this package is available on the Hugging Face Hub as `TimSchneider42/cod-vae-<num_latents>x<latent_dim>`, one repository per model:
@@ -78,13 +86,6 @@ vae = CODVAE.from_pretrained("TimSchneider42/cod-vae-32x32")   # 32 x 32 = 1024 
 A shape is compressed into `num_latents` x `latent_dim` numbers, so the grid spans 16 (4x4) to 2048 (64x32) numbers per shape; `32x32` and `64x32` correspond to the released `vae_m32` and `vae_m64` configurations.
 The grid is still training — a repository appears once its run finishes, and each model card states the exact state of the checkpoint it holds.
 They were trained on ShapeNet plus [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) meshes rather than on ShapeNet alone — see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-models-were-trained) for the dataset, the recipe, and the exact commands, and each model card for its held-out reconstruction quality.
-To convert an official release into the self-contained npz format (optionally uploading it):
-
-```bash
-cod-vae-convert path/to/vae_m32 vae_m32.npz --push-to-hub user/cod-vae
-```
-
-Note that the original authors have not attached a license to their released weights, so make sure you have their permission before re-hosting converted weights publicly.
 
 ## Training
 
@@ -94,7 +95,7 @@ Training follows the two-stage recipe of the paper:
 2. **Stage 2** freezes the autoencoder and trains the latent VAE modules (`latent_proj_in`/`latent_proj_out`/`latent_decoder`) with a feature matching loss, the reconstruction loss through the frozen decoder, and a KL term.
 
 Both stages consume the same kind of training data: per shape, pools of surface points, uniform volume queries, and near-surface queries with ground-truth **occupancy labels**, from which random subsamples are drawn each step with the reference's anisotropic scaling augmentation.
-These pools are always produced by one and the same preprocessing — the recipe the original authors used to build their ShapeNet training data ([sdf_gen](https://github.com/1zb/sdf_gen)): watertighting via [point_cloud_utils](https://github.com/fwilliams/point-cloud-utils) (so your meshes do **not** need to be watertight), normalization into the [-1, 1] cube, and sampling of the query pools with occupancy labels. It requires the `preprocess` extra (`pip install cod-vae[preprocess]`) and can run in two ways:
+These pools are always produced by one and the same preprocessing — the recipe the original authors used to build their ShapeNet training data ([sdf_gen](https://github.com/1zb/sdf_gen)): watertighting via [point_cloud_utils](https://github.com/fwilliams/point-cloud-utils) where a mesh needs it (so your meshes do **not** need to be watertight), normalization into the [-1, 1] cube, and sampling of the query pools with occupancy labels. It requires the `preprocess` extra (`pip install cod-vae[preprocess]`) and can run in two ways:
 
 1. **On the fly**: point `cod-vae-train` at a directory of meshes; the pools are computed lazily during the first epoch.
 2. **Ahead of time**: `cod-vae-dataset` builds a dataset on disk — preprocess once, train many times, and merge multiple sources (mesh directories, Hugging Face mesh datasets, the original preprocessed ShapeNet data) with train/val/test splits.
@@ -120,8 +121,8 @@ Checkpoints are self-contained npz files loadable by both backends (and by `CODV
 Every source accepts an optional `:FRACTION` suffix (e.g. `--hf TimSchneider42/tactile-mnist-mnist3d:0.1`) to keep only a deterministic random subsample of each split; the selection is controlled by `--seed` (default 0), so the same command always yields the same subset.
 Preprocessing is resumable (existing outputs are skipped unless `--overwrite` is given) and parallelizes with `--workers`, each of which gets its own slice of the available cores (the watertighting and winding-number code parallelizes internally over all cores, which otherwise oversubscribes the machine badly).
 Large builds can additionally be spread over several machines with `--shard INDEX/COUNT`: every shard preprocesses its share of the meshes, and a final run without `--shard` links the `--vecset` sources and writes the `.lst` files.
-A mesh that fails preprocessing aborts the build; pass `--skip-failed` to instead drop failing meshes with a warning (the behavior of the original sdf_gen script).
-Watertighting a pathological mesh can also run for hours without ever raising, which stalls an otherwise finished build; `--timeout SECONDS` treats those as failures too.
+Watertighting is applied only to meshes that need it — one that already bounds a volume is left as it is, since the repair would only resample its surface onto an octree (and on some inputs never terminates); `--watertight-closed-meshes` runs it unconditionally, as the reference script does.
+A mesh that fails preprocessing aborts the build; pass `--skip-failed` to instead drop failing meshes with a warning (the behavior of the original sdf_gen script), and `--timeout SECONDS` to treat one that never returns as a failure too.
 
 ```bash
 cod-vae-dataset data/merged \
