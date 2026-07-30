@@ -75,79 +75,29 @@ A grid of models trained with this package is available on the Hugging Face Hub 
 vae = CODVAE.from_pretrained("TimSchneider42/cod-vae-32x32")   # 32 x 32 = 1024 numbers per shape
 ```
 
-| | `latent_dim` 4 | 8 | 16 | 32 |
+| #latents \ latent-dim | 4 | 8 | 16 | 32 |
 |---|---|---|---|---|
-| **`num_latents` 4** | [cod-vae-4x4](https://huggingface.co/TimSchneider42/cod-vae-4x4) | [4x8](https://huggingface.co/TimSchneider42/cod-vae-4x8) | [4x16](https://huggingface.co/TimSchneider42/cod-vae-4x16) | [4x32](https://huggingface.co/TimSchneider42/cod-vae-4x32) |
-| **8** | [8x4](https://huggingface.co/TimSchneider42/cod-vae-8x4) | [8x8](https://huggingface.co/TimSchneider42/cod-vae-8x8) | [8x16](https://huggingface.co/TimSchneider42/cod-vae-8x16) | [8x32](https://huggingface.co/TimSchneider42/cod-vae-8x32) |
-| **16** | [16x4](https://huggingface.co/TimSchneider42/cod-vae-16x4) | [16x8](https://huggingface.co/TimSchneider42/cod-vae-16x8) | [16x16](https://huggingface.co/TimSchneider42/cod-vae-16x16) | [16x32](https://huggingface.co/TimSchneider42/cod-vae-16x32) |
-| **32** | [32x4](https://huggingface.co/TimSchneider42/cod-vae-32x4) | [32x8](https://huggingface.co/TimSchneider42/cod-vae-32x8) | [32x16](https://huggingface.co/TimSchneider42/cod-vae-32x16) | [32x32](https://huggingface.co/TimSchneider42/cod-vae-32x32) |
-| **64** | [64x4](https://huggingface.co/TimSchneider42/cod-vae-64x4) | [64x8](https://huggingface.co/TimSchneider42/cod-vae-64x8) | [64x16](https://huggingface.co/TimSchneider42/cod-vae-64x16) | [64x32](https://huggingface.co/TimSchneider42/cod-vae-64x32) |
+| **4** | [cod-vae-4x4](https://huggingface.co/TimSchneider42/cod-vae-4x4) | [cod-vae-4x8](https://huggingface.co/TimSchneider42/cod-vae-4x8) | [cod-vae-4x16](https://huggingface.co/TimSchneider42/cod-vae-4x16) | [cod-vae-4x32](https://huggingface.co/TimSchneider42/cod-vae-4x32) |
+| **8** | [cod-vae-8x4](https://huggingface.co/TimSchneider42/cod-vae-8x4) | [cod-vae-8x8](https://huggingface.co/TimSchneider42/cod-vae-8x8) | [cod-vae-8x16](https://huggingface.co/TimSchneider42/cod-vae-8x16) | [cod-vae-8x32](https://huggingface.co/TimSchneider42/cod-vae-8x32) |
+| **16** | [cod-vae-16x4](https://huggingface.co/TimSchneider42/cod-vae-16x4) | [cod-vae-16x8](https://huggingface.co/TimSchneider42/cod-vae-16x8) | [cod-vae-16x16](https://huggingface.co/TimSchneider42/cod-vae-16x16) | [cod-vae-16x32](https://huggingface.co/TimSchneider42/cod-vae-16x32) |
+| **32** | [cod-vae-32x4](https://huggingface.co/TimSchneider42/cod-vae-32x4) | [cod-vae-32x8](https://huggingface.co/TimSchneider42/cod-vae-32x8) | [cod-vae-32x16](https://huggingface.co/TimSchneider42/cod-vae-32x16) | [cod-vae-32x32](https://huggingface.co/TimSchneider42/cod-vae-32x32) |
+| **64** | [cod-vae-64x4](https://huggingface.co/TimSchneider42/cod-vae-64x4) | [cod-vae-64x8](https://huggingface.co/TimSchneider42/cod-vae-64x8) | [cod-vae-64x16](https://huggingface.co/TimSchneider42/cod-vae-64x16) | [cod-vae-64x32](https://huggingface.co/TimSchneider42/cod-vae-64x32) |
 
-A shape is compressed into `num_latents` x `latent_dim` numbers, so the grid spans 16 (4x4) to 2048 (64x32) numbers per shape; `32x32` and `64x32` correspond to the released `vae_m32` and `vae_m64` configurations.
+Rows are `num_latents`, columns are `latent_dim`; a shape is compressed into `num_latents` x `latent_dim` numbers, so the grid spans 16 (4x4) to 2048 (64x32) numbers per shape. `32x32` and `64x32` correspond to the released `vae_m32` and `vae_m64` configurations.
 The grid is still training — a repository appears once its run finishes, and each model card states the exact state of the checkpoint it holds.
-They were trained on ShapeNet plus [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) meshes rather than on ShapeNet alone — see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-models-were-trained) for the dataset, the recipe, and the exact commands, and each model card for its held-out reconstruction quality.
+Unlike the original models, they were not trained on ShapeNet alone, but on 110,077 shapes: the 48,597 ShapeNet training shapes plus 50,000 CAD meshes from ABC and all 11,480 MNIST3D meshes, both from [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist).
+Otherwise the recipe is the paper's — see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-models-were-trained) for the exact commands, and each model card for the model's held-out reconstruction quality.
 
 ## Training
 
-Training follows the two-stage recipe of the paper:
-
-1. **Stage 1** trains the autoencoder (point cloud encoder, triplane decoder with uncertainty-based token pruning, occupancy head) with occupancy reconstruction losses on both the refined and the initial prediction, plus a supervision loss for the uncertainty head.
-2. **Stage 2** freezes the autoencoder and trains the latent VAE modules (`latent_proj_in`/`latent_proj_out`/`latent_decoder`) with a feature matching loss, the reconstruction loss through the frozen decoder, and a KL term.
-
-Both stages consume the same kind of training data: per shape, pools of surface points, uniform volume queries, and near-surface queries with ground-truth **occupancy labels**, from which random subsamples are drawn each step with the reference's anisotropic scaling augmentation.
-These pools are always produced by one and the same preprocessing — the recipe the original authors used to build their ShapeNet training data ([sdf_gen](https://github.com/1zb/sdf_gen)): watertighting via [point_cloud_utils](https://github.com/fwilliams/point-cloud-utils) where a mesh needs it (so your meshes do **not** need to be watertight), normalization into the [-1, 1] cube, and sampling of the query pools with occupancy labels. It requires the `preprocess` extra (`pip install cod-vae[preprocess]`) and can run in two ways:
-
-1. **On the fly**: point `cod-vae-train` at a directory of meshes; the pools are computed lazily during the first epoch.
-2. **Ahead of time**: `cod-vae-dataset` builds a dataset on disk — preprocess once, train many times, and merge multiple sources (mesh directories, Hugging Face mesh datasets, the original preprocessed ShapeNet data) with train/val/test splits.
-
-### Option 1: training directly on meshes
+Both stages of the paper's recipe can be trained with this package, on either backend and on multiple GPUs, either directly on a directory of arbitrary (not necessarily watertight) meshes or on a dataset built ahead of time with `cod-vae-dataset`:
 
 ```bash
 cod-vae-train path/to/meshes checkpoints/stage1 --stage 1 --backend torch
 cod-vae-train path/to/meshes checkpoints/stage2 --stage 2 --init-from checkpoints/stage1/checkpoint_last.npz
 ```
 
-The occupancy pools are computed on the fly; pass `--cache-dir` to reuse them across runs.
-Checkpoints are self-contained npz files loadable by both backends (and by `CODVAE.load`).
-
-### Option 2: building a dataset with cod-vae-dataset
-
-`cod-vae-dataset` builds a training dataset on disk by merging any number of sources:
-
-- `--meshes [NAME=]DIR`: a directory of mesh files. Meshes in `train`/`val`/`test` subdirectories are assigned to the corresponding splits; otherwise everything becomes training data.
-- `--hf [NAME=]DATASET`: a Hugging Face mesh dataset in the [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) format (rows with `mesh.vertices`/`mesh.faces` columns), given as a Hub repository id or a local path. By default the `train`/`val`(`idation`)/`test` splits are used, as far as present; `--hf-split SRC[=DST]` selects and remaps splits explicitly (e.g. `--hf-split holdout=val`).
-- `--vecset PATH`: an existing preprocessed root as distributed by the 3DShape2VecSet authors, merged as-is (symlinked by default; `--link hardlink|copy` to materialize).
-
-Every source accepts an optional `:FRACTION` suffix (e.g. `--hf TimSchneider42/tactile-mnist-mnist3d:0.1`) to keep only a deterministic random subsample of each split; the selection is controlled by `--seed` (default 0), so the same command always yields the same subset.
-Preprocessing is resumable (existing outputs are skipped unless `--overwrite` is given) and parallelizes with `--workers`, each of which gets its own slice of the available cores (the watertighting and winding-number code parallelizes internally over all cores, which otherwise oversubscribes the machine badly).
-Large builds can additionally be spread over several machines with `--shard INDEX/COUNT`: every shard preprocesses its share of the meshes, and a final run without `--shard` links the `--vecset` sources and writes the `.lst` files.
-Watertighting is applied only to meshes that need it — one that already bounds a volume is left as it is, since the repair would only resample its surface onto an octree (and on some inputs never terminates); `--watertight-closed-meshes` runs it unconditionally, as the reference script does.
-A mesh that fails preprocessing aborts the build; pass `--skip-failed` to instead drop failing meshes with a warning (the behavior of the original sdf_gen script), and `--timeout SECONDS` to treat one that never returns as a failure too.
-
-```bash
-cod-vae-dataset data/merged \
-    --meshes path/to/my_meshes \
-    --hf TimSchneider42/tactile-mnist-mnist3d \
-    --vecset path/to/shapenet_vecset_root \
-    --workers 16
-```
-
-Training then points at the built dataset instead of a mesh directory — everything else works exactly as in option 1:
-
-```bash
-cod-vae-train data/merged checkpoints/stage1 --stage 1 --backend torch
-```
-
-`cod-vae-train` detects the input type automatically: a directory containing `ShapeNetV2_point/` is treated as a built dataset, anything else as a directory of mesh files.
-
-Training can also be driven from Python (both options); see [TRAINING.md](TRAINING.md), which also covers replicating the original models' training on ShapeNet.
-
-### Multi-GPU training
-
-- **PyTorch**: standard DistributedDataParallel; launch with `torchrun`, e.g. `torchrun --nproc_per_node=4 -m cod_vae.cli train path/to/data checkpoints --stage 1`.
-- **JAX**: single-process data parallelism across all visible devices; just run the training script and it will shard batches over all GPUs automatically.
-
-In both cases `batch_size` is per device and the learning rate is scaled by the effective batch size, following the reference implementation.
+See [TRAINING.md](TRAINING.md) for the full guide: data preparation, both stages and their hyperparameters, multi-GPU launching, the Python API, replicating the original ShapeNet training, and the commands behind the published models above.
 
 ## Relation to the original implementation
 

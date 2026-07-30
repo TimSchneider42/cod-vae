@@ -1,9 +1,71 @@
-# Training COD-VAE on ShapeNet
+# Training COD-VAE
 
-This guide replicates the training of the released COD-VAE checkpoints (vae_m32 / vae_m64) as closely as this package allows, following the recipe of the reference implementation.
-See the last section for the known differences.
+This guide covers everything about training with this package: how the training data is produced, the two stages and their hyperparameters, multi-GPU launching, the Python API, and the exact commands behind the published `cod-vae-NxM` models.
+The recipe follows the reference implementation, so it also replicates the training of the released checkpoints (vae_m32 / vae_m64) as closely as this package allows; see the last section for the known differences.
 
-## 1. Data
+Training follows the two-stage recipe of the paper:
+
+1. **Stage 1** trains the autoencoder (point cloud encoder, triplane decoder with uncertainty-based token pruning, occupancy head) with occupancy reconstruction losses on both the refined and the initial prediction, plus a supervision loss for the uncertainty head.
+2. **Stage 2** freezes the autoencoder and trains the latent VAE modules (`latent_proj_in`/`latent_proj_out`/`latent_decoder`) with a feature matching loss, the reconstruction loss through the frozen decoder, and a KL term.
+
+Two command line entry points appear below:
+
+- `cod-vae-train` is the general trainer: it takes either a directory of meshes or a preprocessed dataset root and covers the common flags.
+- `examples/train_shapenet.py` is the reference-recipe example for preprocessed roots; it additionally exposes `--accumulate`, `--latent-dim`, `--resume` and `--tf32`, and defaults to the reference's hyperparameters (seed 123456, per-stage batch sizes). All commands in this guide that replicate the paper use it.
+
+Both are thin wrappers around the same Python API (section 6).
+
+## 1. Training data
+
+Both stages consume the same kind of training data: per shape, pools of surface points, uniform volume queries, and near-surface queries with ground-truth **occupancy labels**, from which random subsamples are drawn each step with the reference's anisotropic scaling augmentation.
+Per training sample, 2048 surface points and 4096 volume + 4096 near-surface queries are drawn.
+
+These pools are always produced by one and the same preprocessing — the recipe the original authors used to build their ShapeNet training data ([sdf_gen](https://github.com/1zb/sdf_gen)): watertighting via [point_cloud_utils](https://github.com/fwilliams/point-cloud-utils) where a mesh needs it (so your meshes do **not** need to be watertight), normalization into the [-1, 1] cube, and sampling of the query pools with occupancy labels.
+It requires the `preprocess` extra (`pip install cod-vae[preprocess]`) and can run in two ways: on the fly during training, or ahead of time into a dataset on disk.
+
+### Option 1: training directly on meshes
+
+Point `cod-vae-train` at a directory of mesh files; the occupancy pools are computed lazily during the first epoch.
+
+```bash
+cod-vae-train path/to/meshes checkpoints/stage1 --stage 1 --backend torch
+cod-vae-train path/to/meshes checkpoints/stage2 --stage 2 --init-from checkpoints/stage1/checkpoint_last.npz
+```
+
+Pass `--cache-dir` to reuse the computed pools across runs.
+Checkpoints are self-contained npz files loadable by both backends (and by `CODVAE.load`).
+
+### Option 2: building a dataset with cod-vae-dataset
+
+`cod-vae-dataset` preprocesses ahead of time — preprocess once, train many times — and builds a dataset on disk by merging any number of sources:
+
+- `--meshes [NAME=]DIR`: a directory of mesh files. Meshes in `train`/`val`/`test` subdirectories are assigned to the corresponding splits; otherwise everything becomes training data.
+- `--hf [NAME=]DATASET`: a Hugging Face mesh dataset in the [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) format (rows with `mesh.vertices`/`mesh.faces` columns), given as a Hub repository id or a local path. By default the `train`/`val`(`idation`)/`test` splits are used, as far as present; `--hf-split SRC[=DST]` selects and remaps splits explicitly (e.g. `--hf-split holdout=val`).
+- `--vecset PATH`: an existing preprocessed root as distributed by the 3DShape2VecSet authors (section 2), merged as-is (symlinked by default; `--link hardlink|copy` to materialize).
+
+Every source accepts an optional `:FRACTION` suffix (e.g. `--hf TimSchneider42/tactile-mnist-mnist3d:0.1`) to keep only a deterministic random subsample of each split; the selection is controlled by `--seed` (default 0), so the same command always yields the same subset.
+Preprocessing is resumable (existing outputs are skipped unless `--overwrite` is given) and parallelizes with `--workers`, each of which gets its own slice of the available cores (the watertighting and winding-number code parallelizes internally over all cores, which otherwise oversubscribes the machine badly).
+Large builds can additionally be spread over several machines with `--shard INDEX/COUNT`: every shard preprocesses its share of the meshes, and a final run without `--shard` links the `--vecset` sources and writes the `.lst` files.
+Watertighting is applied only to meshes that need it — one that already bounds a volume is left as it is, since the repair would only resample its surface onto an octree (and on some inputs never terminates); `--watertight-closed-meshes` runs it unconditionally, as the reference script does.
+A mesh that fails preprocessing aborts the build; pass `--skip-failed` to instead drop failing meshes with a warning (the behavior of the original sdf_gen script), and `--timeout SECONDS` to treat one that never returns as a failure too.
+
+```bash
+cod-vae-dataset data/merged \
+    --meshes path/to/my_meshes \
+    --hf TimSchneider42/tactile-mnist-mnist3d \
+    --vecset path/to/shapenet_vecset_root \
+    --workers 16
+```
+
+Training then points at the built dataset instead of a mesh directory — everything else works exactly as in option 1:
+
+```bash
+cod-vae-train data/merged checkpoints/stage1 --stage 1 --backend torch
+```
+
+`cod-vae-train` detects the input type automatically: a directory containing `ShapeNetV2_point/` is treated as a built dataset, anything else as a directory of mesh files.
+
+## 2. The original ShapeNet data
 
 The original models were trained on the preprocessed ShapeNet dataset of [3DShape2VecSet](https://github.com/1zb/3DShape2VecSet): 55 categories, roughly 35k training shapes, each with pools of ~100k surface points and ~100k volume/near-surface query points with ground-truth occupancy labels.
 Download it following the instructions in the 3DShape2VecSet repository and arrange it as (this is the layout the reference implementation expects as well):
@@ -20,21 +82,9 @@ Download it following the instructions in the 3DShape2VecSet repository and arra
 ```
 
 `cod_vae.training.ShapeNetVecSetDataset` reads this layout directly — no HDF5 conversion step is needed.
-Per training sample it draws 2048 surface points and 4096 volume + 4096 near-surface queries and applies the reference's anisotropic scaling augmentation, matching the original data pipeline.
+`cod-vae-dataset` writes exactly this layout too, so a merged root and the authors' original root are interchangeable everywhere below.
 
-> **Training on your own data instead:** if you do not need ShapeNet, `cod_vae.training.MeshOccupancyDataset` computes the same kind of occupancy pools on the fly from arbitrary meshes, using the same sdf_gen preprocessing (see section 5).
-
-### Custom and mixed datasets
-
-The `cod-vae-dataset` tool (see README, "Option 2: building a dataset with cod-vae-dataset") builds a dataset in exactly this layout from any mix of preprocessed 3DShape2VecSet roots, directories of (not necessarily watertight) mesh files, and Hugging Face mesh datasets in the [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) format, applying the original authors' [sdf_gen](https://github.com/1zb/sdf_gen) preprocessing to the meshes:
-
-```bash
-cod-vae-dataset {root_dir} --vecset path/to/shapenet_vecset_root --meshes path/to/my_meshes --hf TimSchneider42/tactile-mnist-mnist3d --workers 16
-```
-
-The rest of this guide applies unchanged to such a merged `{root_dir}`.
-
-## 2. Stage 1 — autoencoder
+## 3. Stage 1 — autoencoder
 
 Stage 1 trains the point cloud encoder, the triplane decoder with uncertainty-based token pruning, and the occupancy head.
 Reference hyperparameters (the defaults of `TrainingConfig(stage=1)` / `examples/train_shapenet.py`):
@@ -68,7 +118,7 @@ Three flags matter for long runs on the torch backend:
 
 For the JAX backend, run the same script with `--backend jax` from a single process; it shards batches across all visible GPUs automatically.
 
-## 3. Stage 2 — latent VAE
+## 4. Stage 2 — latent VAE
 
 Stage 2 freezes the stage-1 autoencoder and trains only the latent compression modules (`latent_proj_in`, `latent_proj_out`, `latent_decoder`) with the feature matching loss (coeff 1.0), the occupancy reconstruction loss through the frozen decoder (coeff 1.0), and the KL term (effective coeff 1e-6; the reference config nominally says 1e-3 but applies it twice).
 
@@ -100,18 +150,14 @@ for dim in 4 8 16 32; do
 done
 ```
 
-## 4. Using and publishing the result
+## 5. Multi-GPU training
 
-```python
-from cod_vae import CODVAE
+- **PyTorch**: standard DistributedDataParallel; launch with `torchrun`, e.g. `torchrun --nproc_per_node=4 -m cod_vae.cli train path/to/data checkpoints --stage 1`, or `torchrun --nproc_per_node=4 examples/train_shapenet.py ...` as above.
+- **JAX**: single-process data parallelism across all visible devices; just run the training script and it will shard batches over all GPUs automatically.
 
-vae = CODVAE.load("checkpoints/stage2/checkpoint_last.npz")
-vae.push_to_hub("you/cod-vae-m32")  # weights you trained yourself are yours to host
-```
+In both cases `batch_size` is per device and the learning rate is scaled by the effective batch size, following the reference implementation.
 
-A quick qualitative check: encode and decode a few validation shapes (`ShapeNetVecSetDataset(root_dir, split="val")` provides surface points and labeled queries, so occupancy accuracy/IoU can be computed by comparing `vae.decode(latents, queries) > 0` against the labels).
-
-## 5. Training from Python
+## 6. Training from Python
 
 The CLI is a thin wrapper around the Python API; both data options plug into the same `train` functions and use the same sdf_gen preprocessing.
 Directly on meshes (watertight or not), with the occupancy pools computed on the fly (and optionally cached; pass `settings=SdfGenSettings(...)` to adjust the preprocessing):
@@ -138,6 +184,17 @@ dataset = ShapeNetVecSetDataset("data/merged", split="train", repeat=16)
 
 Here no caching is needed (the pools are read straight from disk), `categories=[...]` restricts training to a subset of the merged sources, and `split="val"`/`"test"` instantiates held-out splits for evaluation.
 In both cases the resulting `params` are a flat numpy dict compatible with both backends (`CODVAE(config, params)`, `save_npz`, `push_to_hub`).
+
+## 7. Using and publishing the result
+
+```python
+from cod_vae import CODVAE
+
+vae = CODVAE.load("checkpoints/stage2/checkpoint_last.npz")
+vae.push_to_hub("you/cod-vae-m32")  # weights you trained yourself are yours to host
+```
+
+A quick qualitative check: encode and decode a few validation shapes (`ShapeNetVecSetDataset(root_dir, split="val")` provides surface points and labeled queries, so occupancy accuracy/IoU can be computed by comparing `vae.decode(latents, queries) > 0` against the labels).
 
 ## How the published cod-vae-NxM models were trained
 
@@ -202,7 +259,7 @@ vae.push_to_hub("TimSchneider42/cod-vae-32x32")
 
 ## Known differences from the reference training
 
-- **Precision**: the reference trains with 16-mixed precision; these trainers run in full float32. Expect roughly twice the per-step cost; on H100-class hardware a full stage-1 run remains a matter of days.
+- **Precision**: the reference trains with 16-mixed precision; these trainers run in full float32. Expect roughly twice the per-step cost.
 - **Stage-2 determinism**: the frozen autoencoder runs deterministically here, while the reference (a side effect of Lightning's train mode) keeps stochastic depth active inside it.
 - **Non-bit-identical runs**: weight initialization mirrors torch's default schemes but uses a different RNG, and data ordering/DropPath draws differ from the Lightning pipeline. You will reproduce the recipe and expected quality, not the exact released checkpoint.
 - **Query subsampling**: the reference subsamples query pools with a chunked two-stage scheme for HDF5 IO efficiency; this implementation samples uniformly without replacement, which is what that scheme approximates.
