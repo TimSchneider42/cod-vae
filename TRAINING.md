@@ -154,18 +154,16 @@ cod-vae-dataset data/merged --vecset path/to/shapenet_vecset_root
 # 50,000 of the 204,617 ABC training meshes, at ShapeNet's pool sizes
 cod-vae-dataset data/merged \
     --hf abc=TimSchneider42/tactile-mnist-abc-dataset-small:0.24435897 --hf-split train \
-    --num-vol 500000 --num-surface 250000 \
-    --workers 80 --skip-failed --timeout 900 --skip-watertight-when-closed
+    --num-vol 500000 --num-surface 250000
 
 # all 11,480 MNIST3D training meshes, at a fifth of that
 cod-vae-dataset data/merged \
     --hf mnist3d=TimSchneider42/tactile-mnist-mnist3d --hf-split train \
-    --num-vol 50000 --num-surface 25000 \
-    --workers 80 --skip-failed --timeout 900
+    --num-vol 50000 --num-surface 25000
 ```
 
 Only training splits are used; the test splits of both Hugging Face datasets are built into a separate root the same way (`--hf-split test`) and used exclusively for evaluation.
-Large builds can be spread over machines with `--shard INDEX/COUNT` (see the README).
+Add `--workers N` to parallelize and `--shard INDEX/COUNT` to spread the build over several machines; neither changes the result, since each object's seed comes from its row index rather than from the processing order.
 
 **2. Stage 1, once per `num_latents`.**
 `--repeat 8` rather than the reference's 16, because the merged dataset is three times the size of the ShapeNet set that default was chosen for; an epoch is 880,616 samples either way:
