@@ -17,6 +17,7 @@ from .config import CODVAEConfig
 
 __all__ = [
     "init_params",
+    "adapt_params",
     "point_embed_basis",
     "parameter_names",
     "AUTOENCODER_PREFIX",
@@ -184,3 +185,31 @@ def init_params(config: CODVAEConfig, seed: int = 0) -> Params:
 def parameter_names(config: CODVAEConfig) -> list[str]:
     """Names of all parameters of a model with the given config."""
     return list(init_params(config, seed=0).keys())
+
+
+def adapt_params(
+    params: Params, config: CODVAEConfig, seed: int = 0
+) -> tuple[Params, list[str]]:
+    """
+    Fit ``params`` to ``config``, re-initializing what no longer matches.
+
+    Returns the adapted parameters and the names that were re-initialized because their
+    shape changed or they were missing. This is what makes it possible to train several
+    stage-2 models with different ``latent_dim`` on top of one stage-1 checkpoint: the
+    width of the latent bottleneck only shapes ``latent_proj_in``/``latent_proj_out``,
+    which stage 1 never trains, so those two projections are drawn fresh and the whole
+    autoencoder carries over untouched. (``num_latents`` needs no adaptation at all -- it
+    is a token count, and no parameter shape depends on it -- but note that the
+    autoencoder *was* trained at one particular count.)
+    """
+    fresh = init_params(config, seed=seed)
+    adapted: Params = {}
+    reinitialized: list[str] = []
+    for name, value in fresh.items():
+        current = params.get(name)
+        if current is not None and current.shape == value.shape:
+            adapted[name] = current
+        else:
+            adapted[name] = value
+            reinitialized.append(name)
+    return adapted, reinitialized

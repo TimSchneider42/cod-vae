@@ -4,6 +4,7 @@ decrease the stage-1 loss on a trivial dataset, only update the intended paramet
 and work multi-device (torchrun/DDP on CPU, jax with forced host devices).
 """
 
+import dataclasses
 import os
 import subprocess
 import sys
@@ -14,7 +15,7 @@ import pytest
 import trimesh
 
 from cod_vae import CODVAEConfig
-from cod_vae.init import LATENT_PREFIXES
+from cod_vae.init import LATENT_PREFIXES, adapt_params, init_params
 from cod_vae.training import MeshOccupancyDataset, SdfGenSettings, TrainingConfig
 
 # Mesh-based training preprocesses with the sdf_gen recipe, which needs pcu.
@@ -37,6 +38,37 @@ def dataset():
             num_vol=2000, num_surface=1000, watertight_resolution=1000
         ),
     )
+
+
+def test_adapt_params_to_a_new_latent_dim(tiny_config):
+    """
+    A stage-1 checkpoint must be reusable for stage-2 runs of any latent width: the
+    autoencoder has to carry over untouched, and only the two projections whose shapes
+    depend on latent_dim may be drawn fresh.
+    """
+    trained = init_params(tiny_config, seed=1)
+    wider = dataclasses.replace(tiny_config, latent_dim=tiny_config.latent_dim * 2)
+    adapted, reinitialized = adapt_params(trained, wider, seed=2)
+
+    assert set(adapted) == set(init_params(wider))
+    assert all(name.startswith(LATENT_PREFIXES) for name in reinitialized)
+    assert set(reinitialized) == {
+        "latent_proj_in.1.weight",
+        "latent_proj_in.1.bias",
+        "latent_proj_out.0.weight",
+    }
+    for name, value in adapted.items():
+        if name in reinitialized:
+            assert value.shape != trained[name].shape
+        else:
+            np.testing.assert_array_equal(value, trained[name])
+
+    # num_latents is a token count: nothing to adapt, every parameter carries over.
+    more_tokens = dataclasses.replace(tiny_config, num_latents=tiny_config.num_latents * 2)
+    adapted, reinitialized = adapt_params(trained, more_tokens, seed=2)
+    assert reinitialized == []
+    for name, value in adapted.items():
+        np.testing.assert_array_equal(value, trained[name])
 
 
 def test_dataset_items(dataset):

@@ -11,9 +11,11 @@ Multi-GPU:
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 
 from cod_vae import CODVAEConfig, load_npz
+from cod_vae.init import adapt_params
 from cod_vae.training import ShapeNetVecSetDataset, TrainingConfig
 
 
@@ -33,7 +35,20 @@ def main() -> None:
         help="stage-1 npz checkpoint (required for stage 2; optional resume for stage 1)",
     )
     parser.add_argument(
-        "--num-latents", type=int, default=32, help="32 for vae_m32, 64 for vae_m64"
+        "--num-latents",
+        type=int,
+        default=None,
+        help="number of latent tokens (default 32: vae_m32; 64 for vae_m64). The "
+        "autoencoder is trained through this many tokens, so it cannot be changed "
+        "between the stages of one model",
+    )
+    parser.add_argument(
+        "--latent-dim",
+        type=int,
+        default=None,
+        help="width of each latent vector (default 32). Only the latent VAE's "
+        "projections depend on it, and stage 1 never trains those, so several stage-2 "
+        "models with different widths can share one stage-1 checkpoint",
     )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument(
@@ -75,10 +90,27 @@ def main() -> None:
     params = None
     if args.init_from is not None:
         config, params = load_npz(args.init_from)
+        if args.num_latents is not None and args.num_latents != config.num_latents:
+            parser.error(
+                f"{args.init_from} was trained with num_latents={config.num_latents}, "
+                f"not {args.num_latents}: the autoencoder attends from that many tokens, "
+                f"so a different count needs its own stage-1 run"
+            )
+        if args.latent_dim is not None and args.latent_dim != config.latent_dim:
+            config = replace(config, latent_dim=args.latent_dim)
+            params, reinitialized = adapt_params(params, config, seed=args.seed)
+            print(
+                f"latent_dim {args.latent_dim} instead of the checkpoint's: "
+                f"re-initialized {len(reinitialized)} parameters "
+                f"({', '.join(reinitialized)})"
+            )
     else:
         if args.stage == 2:
             parser.error("--init-from is required for stage 2")
-        config = CODVAEConfig(num_latents=args.num_latents)
+        config = CODVAEConfig(
+            num_latents=args.num_latents if args.num_latents is not None else 32,
+            latent_dim=args.latent_dim if args.latent_dim is not None else 32,
+        )
 
     train_config = TrainingConfig(
         stage=args.stage,
@@ -92,7 +124,8 @@ def main() -> None:
     )
     print(
         f"Stage {args.stage} on {len(dataset)} samples/epoch "
-        f"({len(dataset.items)} shapes x repeat {args.repeat})"
+        f"({len(dataset.items)} shapes x repeat {args.repeat}), "
+        f"{config.num_latents} x {config.latent_dim} latents"
     )
 
     if args.backend == "torch":

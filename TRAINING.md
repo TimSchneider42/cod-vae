@@ -85,6 +85,21 @@ torchrun --nproc_per_node=16 examples/train_shapenet.py {root_dir} checkpoints/s
 
 Since the encoder pass runs without gradients and only the small latent modules are trained, stage 2 is considerably faster per epoch than stage 1.
 
+### Latent size: what belongs to which stage
+
+A shape is compressed into `num_latents` x `latent_dim` numbers, and the two factors are not interchangeable:
+
+- **`num_latents`** is a token count. The encoder attends from that many farthest-point queries and the triplane decoder attends over them, so the autoencoder is trained *through* it — a different count needs its own stage-1 run. No parameter shape depends on it, and passing `--num-latents` together with a mismatching `--init-from` is refused rather than silently ignored.
+- **`latent_dim`** is the width of each latent vector. It shapes only `latent_proj_in.1` and `latent_proj_out.0`, both of which stage 1 leaves at their initial values. So **one stage-1 checkpoint serves any number of latent widths**: pass `--latent-dim` to stage 2 and those two projections are re-initialized (`cod_vae.init.adapt_params`) while all 137M autoencoder parameters carry over.
+
+```bash
+# One autoencoder, four latent widths -- each a complete stage-2 run.
+for dim in 4 8 16 32; do
+    torchrun --nproc_per_node=4 examples/train_shapenet.py {root_dir} checkpoints/stage2_d$dim \
+        --stage 2 --init-from checkpoints/stage1/checkpoint_last.npz --latent-dim $dim
+done
+```
+
 ## 4. Using and publishing the result
 
 ```python
