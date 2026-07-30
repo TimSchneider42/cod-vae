@@ -64,7 +64,9 @@ def test_adapt_params_to_a_new_latent_dim(tiny_config):
             np.testing.assert_array_equal(value, trained[name])
 
     # num_latents is a token count: nothing to adapt, every parameter carries over.
-    more_tokens = dataclasses.replace(tiny_config, num_latents=tiny_config.num_latents * 2)
+    more_tokens = dataclasses.replace(
+        tiny_config, num_latents=tiny_config.num_latents * 2
+    )
     adapted, reinitialized = adapt_params(trained, more_tokens, seed=2)
     assert reinitialized == []
     for name, value in adapted.items():
