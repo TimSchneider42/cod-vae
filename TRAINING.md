@@ -139,6 +139,69 @@ dataset = ShapeNetVecSetDataset("data/merged", split="train", repeat=16)
 Here no caching is needed (the pools are read straight from disk), `categories=[...]` restricts training to a subset of the merged sources, and `split="val"`/`"test"` instantiates held-out splits for evaluation.
 In both cases the resulting `params` are a flat numpy dict compatible with both backends (`CODVAE(config, params)`, `save_npz`, `push_to_hub`).
 
+## How the published cod-vae-NxM models were trained
+
+The `TimSchneider42/cod-vae-<num_latents>x<latent_dim>` models on the Hugging Face Hub (see the README) were produced with the commands below.
+They differ from the original models in their training data: ShapeNet plus two [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) mesh datasets, 110,077 shapes in total.
+
+**1. Build the merged dataset.**
+The pool sizes are scaled per source, since a CAD assembly needs a finer occupancy sampling than an embossed digit, and ShapeNet's own pools hold 500k volume and 500k near-surface points:
+
+```bash
+# ShapeNet (55 synsets, 48,597 training shapes), linked in as-is
+cod-vae-dataset data/merged --vecset path/to/shapenet_vecset_root
+
+# 50,000 of the 204,617 ABC training meshes, at ShapeNet's pool sizes
+cod-vae-dataset data/merged \
+    --hf abc=TimSchneider42/tactile-mnist-abc-dataset-small:0.24435897 --hf-split train \
+    --num-vol 500000 --num-surface 250000 \
+    --workers 80 --skip-failed --timeout 900 --skip-watertight-when-closed
+
+# all 11,480 MNIST3D training meshes, at a fifth of that
+cod-vae-dataset data/merged \
+    --hf mnist3d=TimSchneider42/tactile-mnist-mnist3d --hf-split train \
+    --num-vol 50000 --num-surface 25000 \
+    --workers 80 --skip-failed --timeout 900
+```
+
+Only training splits are used; the test splits of both Hugging Face datasets are built into a separate root the same way (`--hf-split test`) and used exclusively for evaluation.
+Large builds can be spread over machines with `--shard INDEX/COUNT` (see the README).
+
+**2. Stage 1, once per `num_latents`.**
+`--repeat 8` rather than the reference's 16, because the merged dataset is three times the size of the ShapeNet set that default was chosen for; an epoch is 880,616 samples either way:
+
+```bash
+for m in 4 8 16 32 64; do
+    torchrun --nproc_per_node=4 examples/train_shapenet.py data/merged runs/m$m/stage1 \
+        --stage 1 --num-latents $m --repeat 8 --num-workers 10 --tf32 --resume
+done
+```
+
+**3. Stage 2, four latent widths per autoencoder.**
+`latent_dim` shapes only the latent VAE's projections, so all four widths reuse the same stage-1 checkpoint:
+
+```bash
+for m in 4 8 16 32 64; do
+    for d in 4 8 16 32; do
+        torchrun --nproc_per_node=4 examples/train_shapenet.py data/merged runs/m$m/stage2_d$d \
+            --stage 2 --init-from runs/m$m/stage1/checkpoint_last.npz \
+            --latent-dim $d --repeat 8 --num-workers 10 --tf32 --resume
+    done
+done
+```
+
+Everything else is the reference recipe: 100 epochs per stage, effective batch 256 (stage 1) and 512 (stage 2), learning rate 1e-4 scaled by the effective batch and halved at epochs 60/70/80/90 in stage 2, gradient clipping 0.5, seed 123456.
+On four H100s a stage-1 run takes about 2.2 days and a stage-2 run about 18 hours.
+
+**4. Publish.**
+
+```python
+from cod_vae import CODVAE
+
+vae = CODVAE.load("runs/m32/stage2_d32/checkpoint_last.npz")
+vae.push_to_hub("TimSchneider42/cod-vae-32x32")
+```
+
 ## Known differences from the reference training
 
 - **Precision**: the reference trains with 16-mixed precision; these trainers run in full float32. Expect roughly twice the per-step cost; on H100-class hardware a full stage-1 run remains a matter of days.

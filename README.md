@@ -58,6 +58,26 @@ volume = vae.decode_volume(latents, resolution=128)  # dense logit grid
 ```
 
 Models can be loaded from a Hugging Face Hub repo id, a local npz file, or an official COD-VAE release directory (`config.yaml` + `*.pt`, requires the `convert` extra), and saved/uploaded via `vae.save(path)` and `vae.push_to_hub("user/repo")`.
+
+### Pretrained models
+
+A grid of models trained with this package is available on the Hugging Face Hub as `TimSchneider42/cod-vae-<num_latents>x<latent_dim>`, one repository per model:
+
+```python
+vae = CODVAE.from_pretrained("TimSchneider42/cod-vae-32x32")   # 32 x 32 = 1024 numbers per shape
+```
+
+| | `latent_dim` 4 | 8 | 16 | 32 |
+|---|---|---|---|---|
+| **`num_latents` 4** | [cod-vae-4x4](https://huggingface.co/TimSchneider42/cod-vae-4x4) | [4x8](https://huggingface.co/TimSchneider42/cod-vae-4x8) | [4x16](https://huggingface.co/TimSchneider42/cod-vae-4x16) | [4x32](https://huggingface.co/TimSchneider42/cod-vae-4x32) |
+| **8** | [8x4](https://huggingface.co/TimSchneider42/cod-vae-8x4) | [8x8](https://huggingface.co/TimSchneider42/cod-vae-8x8) | [8x16](https://huggingface.co/TimSchneider42/cod-vae-8x16) | [8x32](https://huggingface.co/TimSchneider42/cod-vae-8x32) |
+| **16** | [16x4](https://huggingface.co/TimSchneider42/cod-vae-16x4) | [16x8](https://huggingface.co/TimSchneider42/cod-vae-16x8) | [16x16](https://huggingface.co/TimSchneider42/cod-vae-16x16) | [16x32](https://huggingface.co/TimSchneider42/cod-vae-16x32) |
+| **32** | [32x4](https://huggingface.co/TimSchneider42/cod-vae-32x4) | [32x8](https://huggingface.co/TimSchneider42/cod-vae-32x8) | [32x16](https://huggingface.co/TimSchneider42/cod-vae-32x16) | [32x32](https://huggingface.co/TimSchneider42/cod-vae-32x32) |
+| **64** | [64x4](https://huggingface.co/TimSchneider42/cod-vae-64x4) | [64x8](https://huggingface.co/TimSchneider42/cod-vae-64x8) | [64x16](https://huggingface.co/TimSchneider42/cod-vae-64x16) | [64x32](https://huggingface.co/TimSchneider42/cod-vae-64x32) |
+
+A shape is compressed into `num_latents` x `latent_dim` numbers, so the grid spans 16 (4x4) to 2048 (64x32) numbers per shape; `32x32` and `64x32` correspond to the released `vae_m32` and `vae_m64` configurations.
+The grid is still training — a repository appears once its run finishes, and each model card states the exact state of the checkpoint it holds.
+They were trained on ShapeNet plus [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist) meshes rather than on ShapeNet alone — see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-models-were-trained) for the dataset, the recipe, and the exact commands, and each model card for its held-out reconstruction quality.
 To convert an official release into the self-contained npz format (optionally uploading it):
 
 ```bash

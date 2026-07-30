@@ -45,10 +45,12 @@ def push_to_hub(
     filename: str = DEFAULT_WEIGHTS_FILENAME,
     private: bool = False,
     commit_message: str = "Upload COD-VAE weights",
+    card: str | None = None,
 ) -> str:
     """
     Upload weights to a Hugging Face Hub model repository (created if it does not
-    exist). Returns the repository URL.
+    exist). Returns the repository URL. ``card`` is uploaded as the repository's
+    README.md, i.e. the model card shown on the Hub.
     """
     import tempfile
 
@@ -64,4 +66,13 @@ def push_to_hub(
             repo_id=repo_id,
             commit_message=commit_message,
         )
+        if card is not None:
+            card_path = Path(tmpdir) / "README.md"
+            card_path.write_text(card)
+            api.upload_file(
+                path_or_fileobj=card_path,
+                path_in_repo="README.md",
+                repo_id=repo_id,
+                commit_message=commit_message,
+            )
     return str(repo_url)
