@@ -84,6 +84,7 @@ vae = CODVAE.from_pretrained("TimSchneider42/cod-vae-32x32")   # 32 x 32 = 1024 
 | **64** | [cod-vae-64x4](https://huggingface.co/TimSchneider42/cod-vae-64x4) | [cod-vae-64x8](https://huggingface.co/TimSchneider42/cod-vae-64x8) | [cod-vae-64x16](https://huggingface.co/TimSchneider42/cod-vae-64x16) | [cod-vae-64x32](https://huggingface.co/TimSchneider42/cod-vae-64x32) |
 
 Rows are `num_latents`, columns are `latent_dim`; a shape is compressed into `num_latents` x `latent_dim` numbers, so the grid spans 16 (4x4) to 2048 (64x32) numbers per shape. `32x32` and `64x32` correspond to the released `vae_m32` and `vae_m64` configurations.
+The largest model is additionally published under the short name [`TimSchneider42/cod-vae`](https://huggingface.co/TimSchneider42/cod-vae), which is what the examples above load; it is a copy of `cod-vae-64x32`, not a link to it, since the Hub has no aliasing between repositories.
 The grid is still training — a repository appears once its run finishes, and each model card states the exact state of the checkpoint it holds.
 Unlike the original models, they were not trained on ShapeNet alone, but on 110,077 shapes: the 48,597 ShapeNet training shapes plus 50,000 CAD meshes from ABC and all 11,480 MNIST3D meshes, both from [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist).
 Otherwise the recipe is the paper's — see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-models-were-trained) for the exact commands, and each model card for the model's held-out reconstruction quality.
