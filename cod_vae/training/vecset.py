@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import ast
 import struct
+import sys
+import time
 import zipfile
 from pathlib import Path
 from typing import Sequence
@@ -125,6 +127,8 @@ class _PoolFile:
 
 
 class ShapeNetVecSetDataset:
+    _substitute_attempts = 4
+
     def __init__(
         self,
         root_dir: Path | str,
@@ -137,6 +141,7 @@ class ShapeNetVecSetDataset:
         repeat: int = 1,
         seed: int = 0,
         near_groups: int = 2,
+        io_retry_seconds: float = 240.0,
     ):
         self.root_dir = Path(root_dir)
         self.point_dir = self.root_dir / "ShapeNetV2_point"
@@ -151,6 +156,7 @@ class ShapeNetVecSetDataset:
         # deviation and concatenated (two in the reference data), so a sample takes a
         # block out of each group to keep the mix of noise levels.
         self.near_groups = near_groups
+        self.io_retry_seconds = io_retry_seconds
         self.epoch = 0
         self._scales: dict[tuple[str, str], float] = {}
 
@@ -185,6 +191,65 @@ class ShapeNetVecSetDataset:
         return offset + int(rng.integers(0, total - count + 1))
 
     def __getitem__(self, index: int) -> dict[str, np.ndarray]:
+        """
+        Read one item, riding out a storage layer that transiently loses a file.
+
+        Network filesystems can refuse an individual file for minutes and then serve it
+        again (seen here as ``OSError`` 521, the NFS ``EBADHANDLE``, on one compute node
+        while every other node read the same file without complaint). Multi-day training
+        must not die on that, so a failed read is retried until
+        ``io_retry_seconds`` has passed. If the file is still unreadable by then it is a
+        real problem with that file rather than a blip, and the item falls back to
+        another shape -- announced on stderr, never silently -- so the run continues.
+
+        The retry budget stays well under the distributed watchdog timeout: a stalled
+        worker holds up its rank's collective, and a rank that is late enough looks like
+        a dead one.
+        """
+        deadline = time.monotonic() + self.io_retry_seconds
+        delay = 0.5
+        while True:
+            try:
+                return self._load(index)
+            except OSError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    print(
+                        f"[vecset] giving up on item {index} after "
+                        f"{self.io_retry_seconds:.0f}s: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    break
+                print(
+                    f"[vecset] read failed for item {index}, retrying for another "
+                    f"{remaining:.0f}s: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(min(delay, remaining))
+                delay = min(delay * 2, 30.0)
+
+        # Substitutes are stepped by a prime so that a run of neighbouring items that
+        # share an unreadable file do not all land on the same replacement.
+        for step in range(1, self._substitute_attempts + 1):
+            substitute = (index + step * 7919) % len(self)
+            try:
+                item = self._load(substitute)
+            except OSError:
+                continue
+            print(
+                f"[vecset] item {index} is unreadable; using item {substitute} instead",
+                file=sys.stderr,
+                flush=True,
+            )
+            return item
+        raise OSError(
+            f"item {index} and {self._substitute_attempts} substitutes are all "
+            f"unreadable under {self.root_dir}"
+        )
+
+    def _load(self, index: int) -> dict[str, np.ndarray]:
         category, object_id = self.items[index % len(self.items)]
         rng = np.random.default_rng((self.seed, self.epoch, index))
 
@@ -193,46 +258,47 @@ class ShapeNetVecSetDataset:
             scale = float(np.load(self.point_dir / category / f"{object_id}.npy"))
             self._scales[(category, object_id)] = scale
 
-        queries_file = _PoolFile(self.point_dir / category / f"{object_id}.npz")
-        surface_file = _PoolFile(
-            self.surface_dir / category / "4_pointcloud" / f"{object_id}.npz"
-        )
+        with (
+            _PoolFile(self.point_dir / category / f"{object_id}.npz") as queries_file,
+            _PoolFile(
+                self.surface_dir / category / "4_pointcloud" / f"{object_id}.npz"
+            ) as surface_file,
+        ):
+            # The pools are sampled independently and identically per shape, so a
+            # contiguous block is distributed exactly like a random subset -- and costs
+            # one read instead of one per point. This is also what the reference
+            # implementation's chunked HDF5 sampling approximates.
+            start = self._start(rng, surface_file.length("points"), self.pc_size)
+            surface = surface_file.rows("points", start, self.pc_size)
+            surface = surface.astype(np.float32) * scale
 
-        # The pools are sampled independently and identically per shape, so a contiguous
-        # block is distributed exactly like a random subset -- and costs one read
-        # instead of one per point. This is also what the reference implementation's
-        # chunked HDF5 sampling approximates.
-        start = self._start(rng, surface_file.length("points"), self.pc_size)
-        surface = surface_file.rows("points", start, self.pc_size)
-        surface = surface.astype(np.float32) * scale
-
-        vol_start = self._start(
-            rng, queries_file.length("vol_points"), self.num_vol_queries
-        )
-        blocks = [
-            (
-                queries_file.rows("vol_points", vol_start, self.num_vol_queries),
-                queries_file.rows("vol_label", vol_start, self.num_vol_queries),
+            vol_start = self._start(
+                rng, queries_file.length("vol_points"), self.num_vol_queries
             )
-        ]
-        near_total = queries_file.length("near_points")
-        groups = self.near_groups if near_total % self.near_groups == 0 else 1
-        group_size = near_total // groups
-        for group in range(groups):
-            count = self.num_near_queries // groups
-            if group == groups - 1:
-                count = self.num_near_queries - count * (groups - 1)
-            near_start = self._start(rng, group_size, count, offset=group * group_size)
-            blocks.append(
+            blocks = [
                 (
-                    queries_file.rows("near_points", near_start, count),
-                    queries_file.rows("near_label", near_start, count),
+                    queries_file.rows("vol_points", vol_start, self.num_vol_queries),
+                    queries_file.rows("vol_label", vol_start, self.num_vol_queries),
                 )
-            )
+            ]
+            near_total = queries_file.length("near_points")
+            groups = self.near_groups if near_total % self.near_groups == 0 else 1
+            group_size = near_total // groups
+            for group in range(groups):
+                count = self.num_near_queries // groups
+                if group == groups - 1:
+                    count = self.num_near_queries - count * (groups - 1)
+                near_start = self._start(
+                    rng, group_size, count, offset=group * group_size
+                )
+                blocks.append(
+                    (
+                        queries_file.rows("near_points", near_start, count),
+                        queries_file.rows("near_label", near_start, count),
+                    )
+                )
         queries = np.concatenate([points for points, _ in blocks]).astype(np.float32)
         labels = np.concatenate([label for _, label in blocks]).astype(np.float32)
-        queries_file.close()
-        surface_file.close()
 
         if self.augment:
             surface, queries = axis_scaling(surface, queries, rng)
