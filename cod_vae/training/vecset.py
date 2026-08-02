@@ -127,8 +127,6 @@ class _PoolFile:
 
 
 class ShapeNetVecSetDataset:
-    _substitute_attempts = 4
-
     def __init__(
         self,
         root_dir: Path | str,
@@ -197,10 +195,16 @@ class ShapeNetVecSetDataset:
         Network filesystems can refuse an individual file for minutes and then serve it
         again (seen here as ``OSError`` 521, the NFS ``EBADHANDLE``, on one compute node
         while every other node read the same file without complaint). Multi-day training
-        must not die on that, so a failed read is retried until
-        ``io_retry_seconds`` has passed. If the file is still unreadable by then it is a
-        real problem with that file rather than a blip, and the item falls back to
-        another shape -- announced on stderr, never silently -- so the run continues.
+        must not die on a blip, so a failed read is retried until ``io_retry_seconds``
+        has passed -- and a retry is free of consequences, because it eventually returns
+        the very sample that was asked for.
+
+        A file still unreadable after that is not a blip, and this raises. Quietly
+        training on a different shape instead would buy a run that finishes over a run
+        that is correct: the substitution is invisible in the weights, so a model trained
+        through a bad node would be silently incomparable to its neighbours in the grid.
+        Failing here is loud, and the job's own retry loop resumes from the last epoch
+        checkpoint, which costs at most one epoch.
 
         The retry budget stays well under the distributed watchdog timeout: a stalled
         worker holds up its rank's collective, and a rank that is late enough looks like
@@ -214,13 +218,11 @@ class ShapeNetVecSetDataset:
             except OSError as exc:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    print(
-                        f"[vecset] giving up on item {index} after "
-                        f"{self.io_retry_seconds:.0f}s: {exc}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    break
+                    raise OSError(
+                        f"item {index} is still unreadable after "
+                        f"{self.io_retry_seconds:.0f}s of retries under {self.root_dir}: "
+                        f"{exc}"
+                    ) from exc
                 print(
                     f"[vecset] read failed for item {index}, retrying for another "
                     f"{remaining:.0f}s: {exc}",
@@ -229,25 +231,6 @@ class ShapeNetVecSetDataset:
                 )
                 time.sleep(min(delay, remaining))
                 delay = min(delay * 2, 30.0)
-
-        # Substitutes are stepped by a prime so that a run of neighbouring items that
-        # share an unreadable file do not all land on the same replacement.
-        for step in range(1, self._substitute_attempts + 1):
-            substitute = (index + step * 7919) % len(self)
-            try:
-                item = self._load(substitute)
-            except OSError:
-                continue
-            print(
-                f"[vecset] item {index} is unreadable; using item {substitute} instead",
-                file=sys.stderr,
-                flush=True,
-            )
-            return item
-        raise OSError(
-            f"item {index} and {self._substitute_attempts} substitutes are all "
-            f"unreadable under {self.root_dir}"
-        )
 
     def _load(self, index: int) -> dict[str, np.ndarray]:
         category, object_id = self.items[index % len(self.items)]
