@@ -158,6 +158,44 @@ class CODVAEBase(ABC):
         )
         return logits[:, :num_queries]
 
+    def occupancy_loss(
+        self,
+        latents: np.ndarray,
+        queries: np.ndarray,
+        labels: np.ndarray,
+        num_vol: int,
+        vol_coeff: float = 1.0,
+        near_coeff: float = 0.1,
+        chunk_size: int = 65536,
+    ) -> np.ndarray:
+        """
+        Numpy wrapper of COD-VAE's occupancy reconstruction loss (see
+        :func:`cod_vae.torch.occupancy_loss` / :func:`cod_vae.jax.occupancy_loss`):
+        decodes occupancy logits of latents (B, L, D) at query points (B, N, 3) on the
+        model's backend/device and computes the per-sample (B,) binary cross entropy
+        against labels (B, N), where the first ``num_vol`` queries of each sample are
+        the uniform-volume ones (weight ``vol_coeff``) and the remainder are
+        near-surface (weight ``near_coeff``).
+        """
+        latents = np.asarray(latents, dtype=np.float32)
+        queries = np.asarray(queries, dtype=np.float32)
+        labels = np.asarray(labels, dtype=np.float32)
+        if latents.ndim != 3 or queries.ndim != 3 or labels.ndim != 2:
+            raise ValueError(
+                f"Expected batched latents (B, L, D), queries (B, N, 3), and labels "
+                f"(B, N), got shapes {latents.shape}, {queries.shape}, and "
+                f"{labels.shape}."
+            )
+        logits = self.decode(latents, queries, chunk_size=chunk_size)
+        bce = (
+            np.maximum(logits, 0.0)
+            - logits * labels
+            + np.log1p(np.exp(-np.abs(logits)))
+        )
+        return vol_coeff * bce[:, :num_vol].mean(axis=-1) + near_coeff * bce[
+            :, num_vol:
+        ].mean(axis=-1)
+
     ## -- trimesh interface -----------------------------------------------------------
 
     def encode_mesh(

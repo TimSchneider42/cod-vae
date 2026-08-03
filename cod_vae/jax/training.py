@@ -24,6 +24,7 @@ from ..config import CODVAEConfig
 from ..init import LATENT_PREFIXES, init_params
 from ..training.config import TrainingConfig
 from ..training.data import MeshOccupancyDataset, iterate_batches
+from .loss import bce_with_logits, occupancy_loss
 from .model import (
     DropPath,
     decode_embed,
@@ -37,14 +38,6 @@ from .model import (
 __all__ = ["train"]
 
 
-def _bce_with_logits(logits: jnp.ndarray, labels: jnp.ndarray) -> jnp.ndarray:
-    return (
-        jnp.maximum(logits, 0.0)
-        - logits * labels
-        + jnp.log1p(jnp.exp(-jnp.abs(logits)))
-    )
-
-
 def _occupancy_loss(
     logits: jnp.ndarray,
     labels: jnp.ndarray,
@@ -52,10 +45,7 @@ def _occupancy_loss(
     vol_coeff: float,
     near_coeff: float,
 ) -> jnp.ndarray:
-    losses = _bce_with_logits(logits, labels)
-    return (
-        vol_coeff * losses[:, :num_vol].mean() + near_coeff * losses[:, num_vol:].mean()
-    )
+    return occupancy_loss(logits, labels, num_vol, vol_coeff, near_coeff).mean()
 
 
 def _stage1_loss(
@@ -89,7 +79,7 @@ def _stage1_loss(
     # occupancy prediction at each query point.
     uncertainty = decode_uncertainty(uncertainty_planes, batch["queries"])
     start, end = cfg.uncertainty_range
-    query_loss = _bce_with_logits(init_logits, batch["labels"])
+    query_loss = bce_with_logits(init_logits, batch["labels"])
     target = jax.lax.stop_gradient(
         jnp.clip(query_loss - start, 0.0, end - start) / (end - start)
     )

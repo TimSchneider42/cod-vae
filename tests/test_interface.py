@@ -72,6 +72,34 @@ def test_decode_planes_logits_reject_unbatched(model, point_batch):
         model.decode_logits(planes, np.zeros((5, 3), dtype=np.float32))
 
 
+def test_occupancy_loss_matches_backend(model, point_batch):
+    rng = np.random.default_rng(5)
+    latents = model.encode(point_batch)
+    num_vol = 200
+    queries = rng.uniform(-1, 1, (len(point_batch), num_vol + 100, 3)).astype(
+        np.float32
+    )
+    labels = (rng.random((len(point_batch), num_vol + 100)) > 0.5).astype(np.float32)
+    reference = model.occupancy_loss(latents, queries, labels, num_vol)
+    assert reference.shape == (len(point_batch),)
+    assert np.all(np.isfinite(reference))
+
+    logits = model.decode(latents, queries)
+    if model.backend == "torch":
+        import torch
+
+        from cod_vae.torch import occupancy_loss
+
+        backend_loss = occupancy_loss(
+            torch.from_numpy(logits), torch.from_numpy(labels), num_vol
+        ).numpy()
+    else:
+        from cod_vae.jax import occupancy_loss
+
+        backend_loss = np.asarray(occupancy_loss(logits, labels, num_vol))
+    np.testing.assert_allclose(reference, backend_loss, rtol=1e-5, atol=1e-6)
+
+
 def test_save_load_roundtrip(model, tmp_path, point_batch):
     path = tmp_path / "model.npz"
     model.save(path)

@@ -124,12 +124,19 @@ class MeshOccupancyDataset:
     def __len__(self) -> int:
         return self.num_meshes * self.repeat
 
-    def _pool(self, mesh_index: int) -> dict[str, np.ndarray]:
+    def pool(self, mesh_index: int) -> dict[str, np.ndarray]:
+        """
+        Return the full occupancy pool dict of one mesh (as produced by
+        :func:`cod_vae.training.preprocess.preprocess_mesh`), computing and disk-caching
+        it on first access.
+        """
         if mesh_index in self._pools:
             return self._pools[mesh_index]
         cache_path = None
         if self.cache_dir is not None:
-            tag = hashlib.sha1(repr(self.settings).encode()).hexdigest()[:8]
+            # The version suffix invalidates caches from before the pool format gained
+            # the "shifts"/"scale" normalization transform entries.
+            tag = hashlib.sha1(f"{self.settings!r}:v2".encode()).hexdigest()[:8]
             cache_path = self.cache_dir / f"occupancy_{mesh_index:06d}_{tag}.npz"
             if cache_path.exists():
                 data = dict(np.load(cache_path))
@@ -147,7 +154,7 @@ class MeshOccupancyDataset:
 
     def __getitem__(self, index: int) -> dict[str, np.ndarray]:
         mesh_index = index % self.num_meshes
-        pool = self._pool(mesh_index)
+        pool = self.pool(mesh_index)
         rng = np.random.default_rng((self.seed, self.epoch, index))
 
         surface = pool["surface"][
@@ -178,7 +185,7 @@ class MeshOccupancyDataset:
         for index in range(self.num_meshes):
             if verbose:
                 print(f"Computing occupancy pools: {index + 1}/{self.num_meshes}")
-            self._pool(index)
+            self.pool(index)
 
 
 def iterate_batches(

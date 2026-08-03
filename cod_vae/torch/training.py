@@ -25,6 +25,7 @@ from ..config import CODVAEConfig
 from ..init import LATENT_PREFIXES, init_params
 from ..training.config import TrainingConfig
 from ..training.data import MeshOccupancyDataset
+from .loss import occupancy_loss
 from .model import CODVAEModule
 
 __all__ = ["train"]
@@ -37,9 +38,7 @@ def _occupancy_loss(
     vol_coeff: float,
     near_coeff: float,
 ) -> torch.Tensor:
-    vol = F.binary_cross_entropy_with_logits(logits[:, :num_vol], labels[:, :num_vol])
-    near = F.binary_cross_entropy_with_logits(logits[:, num_vol:], labels[:, num_vol:])
-    return vol_coeff * vol + near_coeff * near
+    return occupancy_loss(logits, labels, num_vol, vol_coeff, near_coeff).mean()
 
 
 class _LossModule(nn.Module):

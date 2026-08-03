@@ -119,7 +119,8 @@ def preprocess_mesh(
     points (the surface samples perturbed once per standard deviation, as in the
     reference script). Returns "surface", "vol_points", "vol_label", "near_points", and
     "near_label" (occupancy: 1 inside, 0 outside), all float32 and in the same
-    normalized frame.
+    normalized frame, plus the normalization transform mapping original mesh coordinates
+    into that frame as "shifts" and "scale" (cube = (original - shifts) * scale).
     """
     pcu = _require_point_cloud_utils()
 
@@ -165,6 +166,8 @@ def preprocess_mesh(
         "vol_label": (vol_sdf < 0).astype(np.float32),
         "near_points": near_points.astype(np.float32),
         "near_label": (near_sdf < 0).astype(np.float32),
+        "shifts": shifts.astype(np.float32),
+        "scale": np.float32(scale),
     }
 
 

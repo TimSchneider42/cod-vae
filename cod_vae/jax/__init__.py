@@ -1,3 +1,4 @@
+from .loss import bce_with_logits, occupancy_loss
 from .model import (
     CODVAEJax,
     DropPath,
@@ -15,6 +16,7 @@ from .model import (
 __all__ = [
     "CODVAEJax",
     "DropPath",
+    "bce_with_logits",
     "decode_embed",
     "decode_latents",
     "decode_logits",
@@ -24,4 +26,5 @@ __all__ = [
     "encode_embed",
     "encode_moments",
     "farthest_point_sampling",
+    "occupancy_loss",
 ]

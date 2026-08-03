@@ -43,6 +43,20 @@ def test_preprocess_mesh_geometry():
     np.testing.assert_array_equal(data["vol_label"][vol_radii < 0.5], 1.0)
     np.testing.assert_array_equal(data["vol_label"][vol_radii > 1.2], 0.0)
 
+    # The normalization transform maps original mesh coordinates into the query frame:
+    # the sphere is centered at the origin with radius 2, so shifts ~ 0 and
+    # scale ~ 0.9 / 2.
+    assert data["shifts"].shape == (3,)
+    assert data["scale"].shape == ()
+    np.testing.assert_allclose(data["shifts"], 0.0, atol=0.05)
+    np.testing.assert_allclose(data["scale"], 0.45, atol=0.05)
+    # Surface points in the query frame map back onto the original sphere (up to the
+    # inflation of the low-resolution watertighting).
+    original_surface = data["surface"] / data["scale"] + data["shifts"]
+    np.testing.assert_allclose(
+        np.linalg.norm(original_surface, axis=1), 2.0, atol=0.25
+    )
+
     # Deterministic given the seed.
     again = preprocess_mesh(sphere.vertices, sphere.faces, TINY, seed=0)
     np.testing.assert_array_equal(data["vol_points"], again["vol_points"])
