@@ -160,18 +160,20 @@ def train(
     for multi-GPU data parallelism.
     """
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
-    if distributed and not torch.distributed.is_initialized():
-        torch.distributed.init_process_group(
-            backend="nccl" if torch.cuda.is_available() else "gloo"
-        )
-    rank = torch.distributed.get_rank() if distributed else 0
-    world_size = torch.distributed.get_world_size() if distributed else 1
     if device is None:
         if torch.cuda.is_available():
             device = f"cuda:{int(os.environ.get('LOCAL_RANK', 0))}"
         else:
             device = "cpu"
     device = torch.device(device)
+    if distributed and not torch.distributed.is_initialized():
+        # The backend must match the device actually used for training, not CUDA
+        # availability: CPU training on a CUDA-capable machine requires gloo.
+        torch.distributed.init_process_group(
+            backend="nccl" if device.type == "cuda" else "gloo"
+        )
+    rank = torch.distributed.get_rank() if distributed else 0
+    world_size = torch.distributed.get_world_size() if distributed else 1
     if device.type == "cuda":
         torch.cuda.set_device(device)
 
