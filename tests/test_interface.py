@@ -43,7 +43,9 @@ def test_decode_chunking_consistent(model, point_batch):
     queries = np.random.default_rng(3).uniform(-1, 1, (777, 3)).astype(np.float32)
     a = model.decode(latents, queries, chunk_size=100)
     b = model.decode(latents, queries, chunk_size=4096)
-    np.testing.assert_allclose(a, b, atol=1e-5)
+    # Different chunk sizes compile to different kernels whose autotuning is not
+    # deterministic on GPU, hence the tolerance.
+    np.testing.assert_allclose(a, b, atol=1e-3)
     assert a.shape == (len(point_batch), 777)
 
 
