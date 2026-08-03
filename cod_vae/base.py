@@ -91,6 +91,37 @@ class CODVAEBase(ABC):
         logits = self._decode_logits_chunked(planes, queries, chunk_size)
         return logits if batched else logits[0]
 
+    def decode_planes(self, latents: np.ndarray) -> Any:
+        """
+        Decode latents (B, num_latents, latent_dim) into a backend-native triplane
+        handle for :meth:`decode_logits`. Splitting :meth:`decode` into these two steps
+        avoids recomputing the (expensive) triplane decoding when the same latents are
+        evaluated at multiple query sets.
+        """
+        latents = np.asarray(latents, dtype=np.float32)
+        if latents.ndim != 3:
+            raise ValueError(
+                f"Expected batched latents of shape (B, num_latents, latent_dim), got "
+                f"shape {latents.shape}."
+            )
+        return self._decode_planes(latents)
+
+    def decode_logits(
+        self, planes: Any, queries: np.ndarray, chunk_size: int = 65536
+    ) -> np.ndarray:
+        """
+        Evaluate occupancy logits (B, N) (positive inside the object) at query points
+        (B, N, 3) in the [-1, 1] cube given a triplane handle from
+        :meth:`decode_planes`.
+        """
+        queries = np.asarray(queries, dtype=np.float32)
+        if queries.ndim != 3:
+            raise ValueError(
+                f"Expected batched queries of shape (B, N, 3), got shape "
+                f"{queries.shape}."
+            )
+        return self._decode_logits_chunked(planes, queries, chunk_size)
+
     def decode_volume(
         self,
         latents: np.ndarray,

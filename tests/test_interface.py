@@ -47,6 +47,31 @@ def test_decode_chunking_consistent(model, point_batch):
     assert a.shape == (len(point_batch), 777)
 
 
+def test_decode_planes_logits_matches_decode(model, point_batch):
+    latents = model.encode(point_batch)
+    queries = (
+        np.random.default_rng(4)
+        .uniform(-1, 1, (len(point_batch), 333, 3))
+        .astype(np.float32)
+    )
+    planes = model.decode_planes(latents)
+    a = model.decode_logits(planes, queries)
+    b = model.decode_logits(planes, queries, chunk_size=100)
+    reference = model.decode(latents, queries)
+    np.testing.assert_allclose(a, reference, atol=1e-5)
+    np.testing.assert_allclose(b, reference, atol=1e-5)
+    assert a.shape == (len(point_batch), 333)
+
+
+def test_decode_planes_logits_reject_unbatched(model, point_batch):
+    latents = model.encode(point_batch)
+    with pytest.raises(ValueError):
+        model.decode_planes(latents[0])
+    planes = model.decode_planes(latents)
+    with pytest.raises(ValueError):
+        model.decode_logits(planes, np.zeros((5, 3), dtype=np.float32))
+
+
 def test_save_load_roundtrip(model, tmp_path, point_batch):
     path = tmp_path / "model.npz"
     model.save(path)
