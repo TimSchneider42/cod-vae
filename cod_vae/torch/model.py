@@ -352,6 +352,60 @@ class CODVAEModule(nn.Module):
         """Multiplicative uncertainty (B, N) at query points (B, N, 3)."""
         return _sample_planes(uncertainty_planes, queries, mode="mult").squeeze(-1)
 
+    ## -- full latents ----------------------------------------------------------------
+
+    def split_full_latent(
+        self, full_latent: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Split full latents (B, num_latents * latent_dim + 4) into latents
+        (B, num_latents, latent_dim), bounding box centers (B, 3), and sizes (B,)
+        (see :meth:`cod_vae.base.CODVAEBase.pack_full_latent` for the layout).
+        """
+        dims = self.config.num_latents * self.config.latent_dim
+        latent = full_latent[:, :dims].reshape(
+            -1, self.config.num_latents, self.config.latent_dim
+        )
+        return latent, full_latent[:, dims : dims + 3], full_latent[:, dims + 3]
+
+    def decode_logits_full(
+        self,
+        planes: torch.Tensor,
+        center: torch.Tensor,
+        size: torch.Tensor,
+        queries: torch.Tensor,
+        object_scale: float = 0.9,
+    ) -> torch.Tensor:
+        """
+        Occupancy logits (B, N) at query points (B, N, 3) given in the [-1, 1]
+        normalized world frame, mapping them into the model's cube via the bounding
+        box center (B, 3) and size (B,) of a full latent (same frame). Sizes are
+        clamped to 1e-3 to guard against (near-)zero size values, which would yield
+        an infinite cube scale.
+        """
+        scale = object_scale / torch.clamp(size, min=1e-3)
+        cube_queries = (queries - center[:, None, :]) * scale[:, None, None]
+        return self.decode_logits(planes, cube_queries)
+
+    def decode_full(
+        self,
+        full_latent: torch.Tensor,
+        queries: torch.Tensor,
+        object_scale: float = 0.9,
+    ) -> torch.Tensor:
+        """
+        Occupancy logits (B, N) of full latents (B, num_latents * latent_dim + 4) at
+        query points (B, N, 3) given in the [-1, 1] normalized world frame.
+        Differentiable with respect to the full latent, including its bounding box
+        center and size entries (whose gradients flow through the triplane
+        interpolation).
+        """
+        latent, center, size = self.split_full_latent(full_latent)
+        planes = self.decode_planes(latent)
+        return self.decode_logits_full(
+            planes, center, size, queries, object_scale=object_scale
+        )
+
 
 class _Autoencoder(nn.Module):
     def __init__(self, config: CODVAEConfig):
@@ -435,3 +489,21 @@ class CODVAETorch(CODVAEBase):
     @torch.no_grad()
     def _decode_logits(self, planes, queries):
         return self.module.decode_logits(planes, self._to_device(queries)).cpu().numpy()
+
+    @torch.no_grad()
+    def _decode_planes_full(self, full_latents):
+        latent, center, size = self.module.split_full_latent(
+            self._to_device(full_latents)
+        )
+        return self.module.decode_planes(latent), center, size
+
+    @torch.no_grad()
+    def _decode_logits_full(self, handle, queries, object_scale):
+        planes, center, size = handle
+        return (
+            self.module.decode_logits_full(
+                planes, center, size, self._to_device(queries), object_scale
+            )
+            .cpu()
+            .numpy()
+        )

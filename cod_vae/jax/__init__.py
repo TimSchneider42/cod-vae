@@ -3,14 +3,17 @@ from .model import (
     CODVAEJax,
     DropPath,
     decode_embed,
+    decode_full,
     decode_latents,
     decode_logits,
+    decode_logits_full,
     decode_planes,
     decode_uncertainty,
     encode,
     encode_embed,
     encode_moments,
     farthest_point_sampling,
+    split_full_latent,
 )
 
 __all__ = [
@@ -18,8 +21,10 @@ __all__ = [
     "DropPath",
     "bce_with_logits",
     "decode_embed",
+    "decode_full",
     "decode_latents",
     "decode_logits",
+    "decode_logits_full",
     "decode_planes",
     "decode_uncertainty",
     "encode",
@@ -27,4 +32,5 @@ __all__ = [
     "encode_moments",
     "farthest_point_sampling",
     "occupancy_loss",
+    "split_full_latent",
 ]

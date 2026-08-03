@@ -60,6 +60,19 @@ class CODVAEBase(ABC):
     def _decode_logits(self, planes: Any, queries: np.ndarray) -> np.ndarray:
         """Evaluate occupancy logits (B, N) at query points (B, N, 3)."""
 
+    @abstractmethod
+    def _decode_planes_full(self, full_latents: np.ndarray) -> Any:
+        """Split full latents (B, F) and decode triplanes into a backend handle."""
+
+    @abstractmethod
+    def _decode_logits_full(
+        self, handle: Any, queries: np.ndarray, object_scale: float
+    ) -> np.ndarray:
+        """
+        Evaluate occupancy logits (B, N) at query points (B, N, 3) in the normalized
+        world frame given a handle from :meth:`_decode_planes_full`.
+        """
+
     ## -- public numpy interface ------------------------------------------------------
 
     def encode(self, points: np.ndarray) -> np.ndarray:
@@ -88,7 +101,9 @@ class CODVAEBase(ABC):
         if queries.ndim == 2:
             queries = np.broadcast_to(queries[None], (latents.shape[0], *queries.shape))
         planes = self._decode_planes(latents)
-        logits = self._decode_logits_chunked(planes, queries, chunk_size)
+        logits = self._decode_logits_chunked(
+            lambda chunk: self._decode_logits(planes, chunk), queries, chunk_size
+        )
         return logits if batched else logits[0]
 
     def decode_planes(self, latents: np.ndarray) -> Any:
@@ -120,7 +135,9 @@ class CODVAEBase(ABC):
                 f"Expected batched queries of shape (B, N, 3), got shape "
                 f"{queries.shape}."
             )
-        return self._decode_logits_chunked(planes, queries, chunk_size)
+        return self._decode_logits_chunked(
+            lambda chunk: self._decode_logits(planes, chunk), queries, chunk_size
+        )
 
     def decode_volume(
         self,
@@ -142,7 +159,7 @@ class CODVAEBase(ABC):
         return logits.reshape((-1, *shape) if batched else shape)
 
     def _decode_logits_chunked(
-        self, planes: Any, queries: np.ndarray, chunk_size: int
+        self, decode_chunk, queries: np.ndarray, chunk_size: int
     ) -> np.ndarray:
         num_queries = queries.shape[1]
         # Pad to a multiple of the chunk size so backends see a fixed shape (avoids
@@ -151,7 +168,7 @@ class CODVAEBase(ABC):
         queries = np.pad(queries, ((0, 0), (0, padded - num_queries), (0, 0)))
         logits = np.concatenate(
             [
-                self._decode_logits(planes, queries[:, i : i + chunk_size])
+                decode_chunk(queries[:, i : i + chunk_size])
                 for i in range(0, padded, chunk_size)
             ],
             axis=1,
@@ -187,6 +204,220 @@ class CODVAEBase(ABC):
                 f"{labels.shape}."
             )
         logits = self.decode(latents, queries, chunk_size=chunk_size)
+        bce = (
+            np.maximum(logits, 0.0)
+            - logits * labels
+            + np.log1p(np.exp(-np.abs(logits)))
+        )
+        return vol_coeff * bce[:, :num_vol].mean(axis=-1) + near_coeff * bce[
+            :, num_vol:
+        ].mean(axis=-1)
+
+    ## -- full latent interface -------------------------------------------------------
+
+    @property
+    def full_latent_size(self) -> int:
+        """Size of the flat full-latent vector: num_latents * latent_dim + 4."""
+        return self.config.num_latents * self.config.latent_dim + 4
+
+    def pack_full_latent(
+        self,
+        latents: np.ndarray,
+        transform: CubeTransform | Sequence[CubeTransform],
+        frame_half_size: float = 1.0,
+        object_scale: float = 0.9,
+    ) -> np.ndarray:
+        """
+        Pack latents ((L, D) or (B, L, D)) and the corresponding cube transform(s) into
+        flat full-latent vectors [flattened latent, center (3), size (1)] of size
+        :attr:`full_latent_size`. center is the bounding box center and size the
+        maximum half-extent of the encoded geometry, both divided by
+        ``frame_half_size``, i.e. expressed in a world frame normalized to [-1, 1] by
+        ``frame_half_size``. A full latent contains everything needed to reconstruct
+        geometry (see :meth:`decode_full` and :meth:`decode_mesh_full`); the transform
+        parameters are stored in float32 like the latent.
+        """
+        latents = np.asarray(latents, dtype=np.float32)
+        batched = latents.ndim == 3
+        if not batched:
+            latents, transform = latents[None], [transform]
+        expected = (self.config.num_latents, self.config.latent_dim)
+        if latents.ndim != 3 or latents.shape[1:] != expected:
+            raise ValueError(
+                f"Expected latents of shape (B,) + {expected}, got {latents.shape}."
+            )
+        if len(transform) != len(latents):
+            raise ValueError(
+                f"Got {len(latents)} latents but {len(transform)} transforms."
+            )
+        transforms = np.stack(
+            [
+                np.concatenate(
+                    [
+                        np.asarray(t.center, dtype=np.float64) / frame_half_size,
+                        [(object_scale / t.scale) / frame_half_size],
+                    ]
+                )
+                for t in transform
+            ]
+        ).astype(np.float32)
+        full = np.concatenate([latents.reshape(len(latents), -1), transforms], axis=1)
+        return full if batched else full[0]
+
+    def unpack_full_latent(
+        self,
+        full_latents: np.ndarray,
+        frame_half_size: float = 1.0,
+        object_scale: float = 0.9,
+    ) -> tuple[np.ndarray, CubeTransform | list[CubeTransform]]:
+        """
+        Inverse of :meth:`pack_full_latent`: split full latents ((full_latent_size,) or
+        (B, full_latent_size)) into latents ((L, D) or (B, L, D)) and the cube
+        transform(s). Sizes are clamped to 1e-3 (in normalized frame units) to guard
+        against (near-)zero size values, which would yield an infinite cube scale.
+        """
+        full_latents = np.asarray(full_latents, dtype=np.float32)
+        original_shape = full_latents.shape
+        batched = full_latents.ndim == 2
+        if not batched:
+            full_latents = full_latents[None]
+        if full_latents.ndim != 2 or full_latents.shape[1] != self.full_latent_size:
+            raise ValueError(
+                f"Expected full latents of shape (B, {self.full_latent_size}) or "
+                f"({self.full_latent_size},), got shape {original_shape}."
+            )
+        dims = self.config.num_latents * self.config.latent_dim
+        latents = full_latents[:, :dims].reshape(
+            -1, self.config.num_latents, self.config.latent_dim
+        )
+        transforms = [
+            CubeTransform(
+                center=np.asarray(row[:3], dtype=np.float64) * frame_half_size,
+                scale=object_scale / (max(float(row[3]), 1e-3) * frame_half_size),
+            )
+            for row in full_latents[:, dims:]
+        ]
+        return (latents, transforms) if batched else (latents[0], transforms[0])
+
+    def encode_mesh_full(
+        self,
+        mesh: trimesh.Trimesh | Sequence[trimesh.Trimesh],
+        num_points: int = 2048,
+        object_scale: float = 0.9,
+        seed: int | None = None,
+        frame_half_size: float = 1.0,
+    ) -> np.ndarray:
+        """
+        Encode meshes into full latents: the flattened COD-VAE latent followed by the
+        bounding box center and size of the mesh, both normalized by
+        ``frame_half_size`` (see :meth:`pack_full_latent`). Unlike the plain latent
+        returned by :meth:`encode_mesh`, a full latent contains everything needed to
+        reconstruct the mesh in its original frame; use :meth:`decode_mesh_full` or
+        :meth:`decode_full` to do so. Returns (full_latent_size,) for a single mesh
+        or (B, full_latent_size) for a sequence.
+        """
+        latents, transforms = self.encode_mesh(
+            mesh,
+            num_points=num_points,
+            object_scale=object_scale,
+            seed=seed,
+            return_transform=True,
+        )
+        return self.pack_full_latent(
+            latents,
+            transforms,
+            frame_half_size=frame_half_size,
+            object_scale=object_scale,
+        )
+
+    def decode_full(
+        self,
+        full_latents: np.ndarray,
+        queries: np.ndarray,
+        chunk_size: int = 65536,
+        object_scale: float = 0.9,
+    ) -> np.ndarray:
+        """
+        Evaluate occupancy logits (positive inside the object) of full latents at query
+        points given in the [-1, 1] normalized world frame (i.e. original coordinates
+        divided by the ``frame_half_size`` the full latent was created with). The
+        mapping into the model's cube happens in the backend, so it dispatches like
+        :meth:`decode`; the differentiable backend-native variants are
+        ``cod_vae.torch.CODVAEModule.decode_full`` and ``cod_vae.jax.decode_full``.
+        full_latents: (full_latent_size,) or (B, full_latent_size); queries: (N, 3) or
+        (B, N, 3).
+        """
+        full_latents = np.asarray(full_latents, dtype=np.float32)
+        queries = np.asarray(queries, dtype=np.float32)
+        batched = full_latents.ndim == 2
+        if not batched:
+            full_latents = full_latents[None]
+        if full_latents.ndim != 2 or full_latents.shape[1] != self.full_latent_size:
+            raise ValueError(
+                f"Expected full latents of shape (B, {self.full_latent_size}) or "
+                f"({self.full_latent_size},), got shape "
+                f"{full_latents.shape if batched else full_latents[0].shape}."
+            )
+        if queries.ndim == 2:
+            queries = np.broadcast_to(
+                queries[None], (len(full_latents), *queries.shape)
+            )
+        handle = self._decode_planes_full(full_latents)
+        logits = self._decode_logits_chunked(
+            lambda chunk: self._decode_logits_full(handle, chunk, object_scale),
+            queries,
+            chunk_size,
+        )
+        return logits if batched else logits[0]
+
+    def decode_mesh_full(
+        self,
+        full_latents: np.ndarray,
+        resolution: int | None = None,
+        chunk_size: int = 65536,
+        frame_half_size: float = 1.0,
+        object_scale: float = 0.9,
+    ) -> trimesh.Trimesh | list[trimesh.Trimesh]:
+        """
+        Decode full latents into meshes in their original frames (the counterpart of
+        :meth:`encode_mesh_full`; pass the same ``frame_half_size``). full_latents:
+        (full_latent_size,) for a single mesh or (B, full_latent_size) for a list.
+        """
+        latents, transforms = self.unpack_full_latent(
+            full_latents, frame_half_size=frame_half_size, object_scale=object_scale
+        )
+        return self.decode_mesh(
+            latents, resolution, transform=transforms, chunk_size=chunk_size
+        )
+
+    def occupancy_loss_full(
+        self,
+        full_latents: np.ndarray,
+        queries: np.ndarray,
+        labels: np.ndarray,
+        num_vol: int,
+        vol_coeff: float = 1.0,
+        near_coeff: float = 0.1,
+        object_scale: float = 0.9,
+        chunk_size: int = 65536,
+    ) -> np.ndarray:
+        """
+        Like :meth:`occupancy_loss`, but for full latents (B, full_latent_size) with
+        query points (B, N, 3) given in the [-1, 1] normalized world frame (see
+        :meth:`decode_full`).
+        """
+        full_latents = np.asarray(full_latents, dtype=np.float32)
+        queries = np.asarray(queries, dtype=np.float32)
+        labels = np.asarray(labels, dtype=np.float32)
+        if full_latents.ndim != 2 or queries.ndim != 3 or labels.ndim != 2:
+            raise ValueError(
+                f"Expected batched full latents (B, {self.full_latent_size}), queries "
+                f"(B, N, 3), and labels (B, N), got shapes {full_latents.shape}, "
+                f"{queries.shape}, and {labels.shape}."
+            )
+        logits = self.decode_full(
+            full_latents, queries, chunk_size=chunk_size, object_scale=object_scale
+        )
         bce = (
             np.maximum(logits, 0.0)
             - logits * labels

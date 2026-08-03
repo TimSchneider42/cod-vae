@@ -45,7 +45,10 @@ __all__ = [
     "decode_embed",
     "decode_planes",
     "decode_logits",
+    "decode_logits_full",
+    "decode_full",
     "decode_uncertainty",
+    "split_full_latent",
 ]
 
 _LAYER_NORM_EPS = 1e-5
@@ -499,6 +502,63 @@ def decode_uncertainty(
     return _sample_planes(uncertainty_planes, queries, mode="mult")[..., 0]
 
 
+def split_full_latent(
+    full_latent: jnp.ndarray, *, config: CODVAEConfig
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Split full latents (B, num_latents * latent_dim + 4) into latents
+    (B, num_latents, latent_dim), bounding box centers (B, 3), and sizes (B,)
+    (see :meth:`cod_vae.base.CODVAEBase.pack_full_latent` for the layout).
+    """
+    dims = config.num_latents * config.latent_dim
+    latent = full_latent[:, :dims].reshape(-1, config.num_latents, config.latent_dim)
+    return latent, full_latent[:, dims : dims + 3], full_latent[:, dims + 3]
+
+
+def decode_logits_full(
+    params: Mapping[str, jnp.ndarray],
+    planes: jnp.ndarray,
+    center: jnp.ndarray,
+    size: jnp.ndarray,
+    queries: jnp.ndarray,
+    *,
+    config: CODVAEConfig,
+    object_scale: float = 0.9,
+) -> jnp.ndarray:
+    """
+    Evaluate occupancy logits (B, N) at query points (B, N, 3) given in the [-1, 1]
+    normalized world frame, mapping them into the model's cube via the bounding box
+    center (B, 3) and size (B,) of a full latent (same frame). Sizes are clamped to
+    1e-3 to guard against (near-)zero size values, which would yield an infinite
+    cube scale.
+    """
+    scale = object_scale / jnp.maximum(size, 1e-3)
+    cube_queries = (queries - center[:, None, :]) * scale[:, None, None]
+    return decode_logits(params, planes, cube_queries, config=config)
+
+
+def decode_full(
+    params: Mapping[str, jnp.ndarray],
+    full_latent: jnp.ndarray,
+    queries: jnp.ndarray,
+    *,
+    config: CODVAEConfig,
+    object_scale: float = 0.9,
+) -> jnp.ndarray:
+    """
+    Evaluate occupancy logits (B, N) of full latents
+    (B, num_latents * latent_dim + 4) at query points (B, N, 3) given in the [-1, 1]
+    normalized world frame. Differentiable with respect to the full latent, including
+    its bounding box center and size entries (whose gradients flow through the
+    triplane interpolation).
+    """
+    latent, center, size = split_full_latent(full_latent, config=config)
+    planes = decode_planes(params, latent, config=config)
+    return decode_logits_full(
+        params, planes, center, size, queries, config=config, object_scale=object_scale
+    )
+
+
 class CODVAEJax(CODVAEBase):
     """JAX backend of COD-VAE (see :class:`cod_vae.base.CODVAEBase`)."""
 
@@ -512,6 +572,17 @@ class CODVAEJax(CODVAEBase):
         self._jit_encode = jax.jit(partial(encode, config=config))
         self._jit_decode_planes = jax.jit(partial(decode_planes, config=config))
         self._jit_decode_logits = jax.jit(partial(decode_logits, config=config))
+        self._jit_decode_logits_full = jax.jit(
+            lambda params, planes, center, size, object_scale, queries: decode_logits_full(
+                params,
+                planes,
+                center,
+                size,
+                queries,
+                config=config,
+                object_scale=object_scale,
+            )
+        )
         super().__init__(config, params)
 
     def _load_params(self, params: Params) -> None:
@@ -532,4 +603,22 @@ class CODVAEJax(CODVAEBase):
     def _decode_logits(self, planes, queries):
         return np.asarray(
             self._jit_decode_logits(self.params, planes, jnp.asarray(queries))
+        )
+
+    def _decode_planes_full(self, full_latents):
+        dims = self.config.num_latents * self.config.latent_dim
+        latents = full_latents[:, :dims].reshape(
+            -1, self.config.num_latents, self.config.latent_dim
+        )
+        planes = self._jit_decode_planes(self.params, jnp.asarray(latents))
+        center = jnp.asarray(full_latents[:, dims : dims + 3])
+        size = jnp.asarray(full_latents[:, dims + 3])
+        return planes, center, size
+
+    def _decode_logits_full(self, handle, queries, object_scale):
+        planes, center, size = handle
+        return np.asarray(
+            self._jit_decode_logits_full(
+                self.params, planes, center, size, object_scale, jnp.asarray(queries)
+            )
         )

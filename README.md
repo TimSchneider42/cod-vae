@@ -49,6 +49,18 @@ reconstruction = vae.decode_mesh(latent, transform=transform)     # trimesh.Trim
 `CODVAE(...)` and its loaders return a backend-specific implementation, preferring JAX if installed and falling back to PyTorch; pass `backend="torch"` or `backend="jax"` to choose explicitly, and `device=...` to select a device.
 All inputs and outputs of the public interface are numpy arrays and trimesh meshes, regardless of the backend.
 
+Since the cube normalization removes the mesh's position and scale, the plain latent only describes the mesh's shape and orientation; the returned `transform` (bounding box center and isotropic scale) is required to map decoded geometry back into the original frame.
+The *full latent* interface packs both into a single flat vector `[flattened latent, center (3), size (1)]`, which contains everything needed to reconstruct the mesh: the mesh's bounding box center and maximum half-extent, normalized by a `frame_half_size` describing the half-extent of the world frame (i.e. vertex positions divided by `frame_half_size` lie in `[-1, 1]`; the default of 1 means the mesh coordinates are used as-is).
+Decoding a full latent maps queries given in this normalized world frame into the model's cube *inside the backend*, so the operation is differentiable with respect to the full latent — including its center and size entries — in the backend-native variants (`cod_vae.torch.CODVAEModule.decode_full`, `cod_vae.jax.decode_full`); the numpy methods dispatch to the model's backend just like `encode`/`decode`:
+
+```python
+full_latent = vae.encode_mesh_full(mesh)        # (num_latents * latent_dim + 4,)
+reconstruction = vae.decode_mesh_full(full_latent)  # trimesh.Trimesh in the original frame
+logits = vae.decode_full(full_latent, queries)  # logits at normalized-world-frame queries
+latent, transform = vae.unpack_full_latent(full_latent)  # split it up again
+full_latent = vae.pack_full_latent(latent, transform)    # ... and re-assemble it
+```
+
 Besides the mesh interface, latents can be computed from raw surface point clouds and decoded at arbitrary query points or into dense grids (all functions accept batched and unbatched inputs):
 
 ```python
