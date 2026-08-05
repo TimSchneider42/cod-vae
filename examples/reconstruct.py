@@ -37,9 +37,7 @@ def main() -> None:
     print(f"Loaded {vae!r} using the {vae.backend} backend")
 
     mesh = trimesh.load(args.input_mesh, force="mesh")
-    full_latent = vae.encode_mesh_full(
-        mesh, num_points=args.num_points, seed=args.seed
-    )
+    full_latent = vae.encode_mesh_full(mesh, num_points=args.num_points, seed=args.seed)
     print(f"Encoded {args.input_mesh.name} into a {full_latent.shape} full latent")
 
     reconstruction = vae.decode_mesh_full(full_latent, resolution=args.resolution)

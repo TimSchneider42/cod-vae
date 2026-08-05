@@ -145,14 +145,12 @@ def test_decode_full(model, meshes):
         ]
     )
     logits = model.decode_full(full, queries)
-    cube_queries = np.stack(
-        [t.apply(q) for t, q in zip(transforms, queries)]
-    ).astype(np.float32)
+    cube_queries = np.stack([t.apply(q) for t, q in zip(transforms, queries)]).astype(
+        np.float32
+    )
     # The backend applies the transform in float32 while the reference maps the
     # queries in float64, hence the tolerance.
-    np.testing.assert_allclose(
-        logits, model.decode(latents, cube_queries), atol=1e-3
-    )
+    np.testing.assert_allclose(logits, model.decode(latents, cube_queries), atol=1e-3)
 
     # Unbatched variant. Different batch sizes compile to numerically slightly
     # different kernels, hence the tolerance.
@@ -171,9 +169,7 @@ def test_decode_full_backend_native(model, meshes):
     if model.backend == "torch":
         import torch
 
-        full_tensor = (
-            torch.from_numpy(full).to(model.device).requires_grad_(True)
-        )
+        full_tensor = torch.from_numpy(full).to(model.device).requires_grad_(True)
         logits = model.module.decode_full(
             full_tensor, torch.from_numpy(queries).to(model.device)
         )

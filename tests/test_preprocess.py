@@ -53,9 +53,7 @@ def test_preprocess_mesh_geometry():
     # Surface points in the query frame map back onto the original sphere (up to the
     # inflation of the low-resolution watertighting).
     original_surface = data["surface"] / data["scale"] + data["shifts"]
-    np.testing.assert_allclose(
-        np.linalg.norm(original_surface, axis=1), 2.0, atol=0.25
-    )
+    np.testing.assert_allclose(np.linalg.norm(original_surface, axis=1), 2.0, atol=0.25)
 
     # Deterministic given the seed.
     again = preprocess_mesh(sphere.vertices, sphere.faces, TINY, seed=0)
@@ -78,9 +76,7 @@ def test_preprocess_mesh_skip_watertighting():
     original_surface = data["surface"] / data["scale"] + data["shifts"]
     # Sampled points lie on the icosphere's flat triangles, slightly inside the
     # nominal radius.
-    np.testing.assert_allclose(
-        np.linalg.norm(original_surface, axis=1), 2.0, atol=0.01
-    )
+    np.testing.assert_allclose(np.linalg.norm(original_surface, axis=1), 2.0, atol=0.01)
     vol_radii = np.linalg.norm(data["vol_points"], axis=1)
     np.testing.assert_array_equal(data["vol_label"][vol_radii < 0.85], 1.0)
     np.testing.assert_array_equal(data["vol_label"][vol_radii > 0.95], 0.0)
