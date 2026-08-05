@@ -64,6 +64,28 @@ def test_preprocess_mesh_geometry():
     assert not np.array_equal(data["vol_points"], other["vol_points"])
 
 
+def test_preprocess_mesh_skip_watertighting():
+    import dataclasses
+
+    sphere = trimesh.creation.icosphere(subdivisions=3, radius=2.0)
+    settings = dataclasses.replace(TINY, watertight_resolution=None)
+    data = preprocess_mesh(sphere.vertices, sphere.faces, settings, seed=0)
+
+    # Without watertighting, the transform is exact and surface points map exactly
+    # back onto the original sphere.
+    np.testing.assert_allclose(data["shifts"], 0.0, atol=1e-6)
+    np.testing.assert_allclose(data["scale"], 0.45, rtol=1e-6)
+    original_surface = data["surface"] / data["scale"] + data["shifts"]
+    # Sampled points lie on the icosphere's flat triangles, slightly inside the
+    # nominal radius.
+    np.testing.assert_allclose(
+        np.linalg.norm(original_surface, axis=1), 2.0, atol=0.01
+    )
+    vol_radii = np.linalg.norm(data["vol_points"], axis=1)
+    np.testing.assert_array_equal(data["vol_label"][vol_radii < 0.85], 1.0)
+    np.testing.assert_array_equal(data["vol_label"][vol_radii > 0.95], 0.0)
+
+
 @pytest.fixture(scope="module")
 def hf_dataset_dir(tmp_path_factory):
     """A tiny mesh dataset in the Tactile MNIST format, saved with save_to_disk."""

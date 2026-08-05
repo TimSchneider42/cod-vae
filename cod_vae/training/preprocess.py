@@ -44,6 +44,8 @@ __all__ = [
     "MESH_SUFFIXES",
     "SdfGenSettings",
     "is_closed_mesh",
+    "watertight_mesh",
+    "sample_occupancy_pools",
     "preprocess_mesh",
     "write_vecset_object",
     "merge_vecset_root",
@@ -79,13 +81,17 @@ def _require_point_cloud_utils():
 
 @dataclass(frozen=True)
 class SdfGenSettings:
-    """Parameters of the sdf_gen preprocessing; defaults match preprocess/box.py."""
+    """
+    Parameters of the sdf_gen preprocessing; defaults match preprocess/box.py. Setting
+    watertight_resolution to None skips the watertighting step, assuming the input
+    meshes are already watertight.
+    """
 
     num_vol: int = 250_000
     num_surface: int = 125_000
     near_stddevs: tuple[float, ...] = (0.005, 0.05)
     object_scale: float = 0.9
-    watertight_resolution: int = 50_000
+    watertight_resolution: int | None = 50_000
     # Watertighting is a repair, and a mesh that already bounds a volume needs none: its
     # occupancy is exact as it is, while the step would resample the surface onto an
     # octree (turning 3.5k vertices into 77k, at seconds per mesh, and rounding sharp
@@ -106,6 +112,95 @@ def is_closed_mesh(vertices: np.ndarray, faces: np.ndarray) -> bool:
     return bool(mesh.is_watertight and mesh.is_winding_consistent)
 
 
+def watertight_mesh(
+    vertices: np.ndarray, faces: np.ndarray, resolution: int, seed: int = 0
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Make a mesh watertight with point_cloud_utils' ManifoldPlus wrapper, as in the
+    sdf_gen reference script. Returns the watertight (vertices, faces).
+    """
+    pcu = _require_point_cloud_utils()
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.ascontiguousarray(faces, dtype=np.int32)
+    return pcu.make_mesh_watertight(vertices, faces, resolution, seed=seed)
+
+
+def sample_occupancy_pools(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    num_surface: int,
+    near_stddevs: Sequence[float],
+    object_scale: float,
+    rng: np.random.Generator | int,
+    num_vol: int | None = None,
+    vol_points: np.ndarray | None = None,
+    near_dtype: np.dtype | type | None = None,
+) -> dict[str, np.ndarray]:
+    """
+    The sampling stage of the sdf_gen preprocessing, applied to an already watertight
+    mesh: normalize it into the [-1, 1] cube (centered at the AABB center, largest
+    extent spanning ``object_scale`` of the cube), sample ``num_surface`` surface
+    points, label volume query points, and generate labeled near-surface points (the
+    surface samples perturbed once per standard deviation, as in the reference
+    script, so ``num_surface * len(near_stddevs)`` points).
+
+    The volume query points are either ``num_vol`` fresh uniform samples of the cube
+    or the externally supplied cube-frame ``vol_points`` (exactly one must be given).
+    If ``near_dtype`` is set, the near-surface points are quantized to that dtype
+    *before* labeling, so the returned points and labels stay exactly consistent
+    even within the tightest band.
+
+    Returns "surface", "vol_points", "vol_label", "near_points", and "near_label"
+    (occupancy labels as bool, True inside), all in the normalized frame, plus the
+    normalization transform mapping original mesh coordinates into that frame as
+    "shifts" and "scale" (cube = (original - shifts) * scale).
+    """
+    pcu = _require_point_cloud_utils()
+    if (num_vol is None) == (vol_points is None):
+        raise ValueError("Exactly one of num_vol and vol_points must be given.")
+    rng = np.random.default_rng(rng)
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.ascontiguousarray(faces, dtype=np.int32)
+
+    shifts = (vertices.max(axis=0) + vertices.min(axis=0)) / 2
+    vw = vertices - shifts
+    scale = (1.0 / np.abs(vw).max()) * object_scale
+    vw = vw * scale
+
+    fid, bc = pcu.sample_mesh_random(
+        vw, faces, num_surface, random_seed=int(rng.integers(1, 2**31))
+    )
+    surface = pcu.interpolate_barycentric_coords(faces, fid, bc, vw)
+
+    if vol_points is None:
+        vol_points = rng.random((num_vol, 3)) * 2 - 1
+    vol_sdf, _, _ = pcu.signed_distance_to_mesh(
+        np.ascontiguousarray(vol_points, dtype=np.float64), vw, faces
+    )
+
+    near_points = np.concatenate(
+        [
+            surface + rng.normal(scale=stddev, size=surface.shape)
+            for stddev in near_stddevs
+        ]
+    )
+    if near_dtype is not None:
+        near_points = near_points.astype(near_dtype)
+    near_sdf, _, _ = pcu.signed_distance_to_mesh(
+        near_points.astype(np.float64), vw, faces
+    )
+
+    return {
+        "surface": surface,
+        "vol_points": vol_points,
+        "vol_label": vol_sdf < 0,
+        "near_points": near_points,
+        "near_label": near_sdf < 0,
+        "shifts": shifts,
+        "scale": scale,
+    }
+
+
 def preprocess_mesh(
     vertices: np.ndarray,
     faces: np.ndarray,
@@ -113,61 +208,50 @@ def preprocess_mesh(
     seed: int = 0,
 ) -> dict[str, np.ndarray]:
     """
-    Apply the sdf_gen preprocessing to a single mesh: watertighting where the mesh needs
-    it, normalization into the [-1, 1] cube, and sampling of the surface / volume /
-    near-surface pools. The near-surface pool has ``num_surface * len(near_stddevs)``
-    points (the surface samples perturbed once per standard deviation, as in the
-    reference script). Returns "surface", "vol_points", "vol_label", "near_points", and
-    "near_label" (occupancy: 1 inside, 0 outside), all float32 and in the same
-    normalized frame, plus the normalization transform mapping original mesh coordinates
-    into that frame as "shifts" and "scale" (cube = (original - shifts) * scale).
+    Apply the sdf_gen preprocessing to a single mesh: watertighting
+    (:func:`watertight_mesh`, skipped where the mesh does not need it, and entirely if
+    ``settings.watertight_resolution`` is None, in which case the input mesh must
+    already be watertight) followed by normalization and pool sampling
+    (:func:`sample_occupancy_pools`).
+    Returns "surface", "vol_points", "vol_label", "near_points", and "near_label"
+    (occupancy: 1 inside, 0 outside), all float32 and in the same normalized frame,
+    plus the normalization transform mapping original mesh coordinates into that frame
+    as "shifts" and "scale" (cube = (original - shifts) * scale).
     """
-    pcu = _require_point_cloud_utils()
-
     if settings is None:
         settings = SdfGenSettings()
     rng = np.random.default_rng(seed)
     vertices = np.asarray(vertices, dtype=np.float64)
     faces = np.ascontiguousarray(faces, dtype=np.int32)
-    if not settings.watertight_closed_meshes and is_closed_mesh(vertices, faces):
+    skip_watertighting = settings.watertight_resolution is None or (
+        not settings.watertight_closed_meshes and is_closed_mesh(vertices, faces)
+    )
+    if skip_watertighting:
         vw, fw = vertices, faces
     else:
-        vw, fw = pcu.make_mesh_watertight(
+        vw, fw = watertight_mesh(
             vertices,
             faces,
             settings.watertight_resolution,
             seed=int(rng.integers(2**31)),
         )
-
-    shifts = (vw.max(axis=0) + vw.min(axis=0)) / 2
-    vw = vw - shifts
-    scale = (1.0 / np.abs(vw).max()) * settings.object_scale
-    vw = vw * scale
-
-    fid, bc = pcu.sample_mesh_random(
-        vw, fw, settings.num_surface, random_seed=int(rng.integers(1, 2**31))
+    pools = sample_occupancy_pools(
+        vw,
+        fw,
+        num_surface=settings.num_surface,
+        near_stddevs=settings.near_stddevs,
+        object_scale=settings.object_scale,
+        rng=rng,
+        num_vol=settings.num_vol,
     )
-    surface = pcu.interpolate_barycentric_coords(fw, fid, bc, vw)
-
-    vol_points = rng.random((settings.num_vol, 3)) * 2 - 1
-    vol_sdf, _, _ = pcu.signed_distance_to_mesh(vol_points, vw, fw)
-
-    near_points = np.concatenate(
-        [
-            surface + rng.normal(scale=stddev, size=surface.shape)
-            for stddev in settings.near_stddevs
-        ]
-    )
-    near_sdf, _, _ = pcu.signed_distance_to_mesh(near_points, vw, fw)
-
     return {
-        "surface": surface.astype(np.float32),
-        "vol_points": vol_points.astype(np.float32),
-        "vol_label": (vol_sdf < 0).astype(np.float32),
-        "near_points": near_points.astype(np.float32),
-        "near_label": (near_sdf < 0).astype(np.float32),
-        "shifts": shifts.astype(np.float32),
-        "scale": np.float32(scale),
+        "surface": pools["surface"].astype(np.float32),
+        "vol_points": pools["vol_points"].astype(np.float32),
+        "vol_label": pools["vol_label"].astype(np.float32),
+        "near_points": pools["near_points"].astype(np.float32),
+        "near_label": pools["near_label"].astype(np.float32),
+        "shifts": pools["shifts"].astype(np.float32),
+        "scale": np.float32(pools["scale"]),
     }
 
 
