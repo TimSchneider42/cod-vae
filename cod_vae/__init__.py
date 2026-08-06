@@ -63,9 +63,11 @@ __all__ = [
 ]
 
 Backend = Literal["auto", "torch", "jax"]
+#: Name of a compute dtype ("float32", "float16", "bfloat16"); None means float32.
+DType = str | None
 
 
-def _mk_torch(config, params, device) -> "CODVAETorch":
+def _mk_torch(config, params, device, dtype=None) -> "CODVAETorch":
     try:
         from .torch import CODVAETorch
     except ImportError as e:
@@ -73,10 +75,10 @@ def _mk_torch(config, params, device) -> "CODVAETorch":
             "Could not import torch. Install it to use the torch backend "
             "(pip install cod-vae[torch])."
         ) from e
-    return CODVAETorch(config, params, device=device)
+    return CODVAETorch(config, params, device=device, dtype=dtype)
 
 
-def _mk_jax(config, params, device) -> "CODVAEJax":
+def _mk_jax(config, params, device, dtype=None) -> "CODVAEJax":
     try:
         from .jax import CODVAEJax
     except ImportError as e:
@@ -84,21 +86,21 @@ def _mk_jax(config, params, device) -> "CODVAEJax":
             "Could not import jax. Install it to use the jax backend "
             "(pip install cod-vae[jax] or cod-vae[jax-cpu])."
         ) from e
-    return CODVAEJax(config, params, device=device)
+    return CODVAEJax(config, params, device=device, dtype=dtype)
 
 
-def _make(config, params, backend: Backend, device) -> CODVAEBase:
+def _make(config, params, backend: Backend, device, dtype: DType = None) -> CODVAEBase:
     if backend == "torch":
-        return _mk_torch(config, params, device)
+        return _mk_torch(config, params, device, dtype)
     if backend == "jax":
-        return _mk_jax(config, params, device)
+        return _mk_jax(config, params, device, dtype)
     if backend == "auto":
         try:
-            return _mk_jax(config, params, device)
+            return _mk_jax(config, params, device, dtype)
         except ImportError:
             pass
         try:
-            return _mk_torch(config, params, device)
+            return _mk_torch(config, params, device, dtype)
         except ImportError:
             raise ImportError(
                 "Could load neither the JAX nor the PyTorch backend. Install either "
@@ -121,8 +123,9 @@ class CODVAE:
         *,
         backend: Backend = "auto",
         device: str | None = None,
+        dtype: DType = None,
     ) -> CODVAEBase:
-        return _make(config, params, backend, device)
+        return _make(config, params, backend, device, dtype)
 
     @classmethod
     def from_pretrained(
@@ -133,10 +136,16 @@ class CODVAE:
         revision: str | None = None,
         backend: Backend = "auto",
         device: str | None = None,
+        dtype: DType = None,
     ) -> CODVAEBase:
         """
         Load a model from a Hugging Face Hub repository id, a local npz file, or a local
         directory containing an official COD-VAE release (config.yaml + *.pt).
+
+        ``dtype`` selects the compute dtype of the model ("float16"/"bfloat16" halve
+        its memory footprint and roughly double its throughput on GPUs); the numpy
+        interface stays float32 regardless, as does the triplane interpolation (see
+        :attr:`cod_vae.CODVAEBase.dtype`).
         """
         path = Path(model_name_or_path)
         if path.is_file():
@@ -151,15 +160,20 @@ class CODVAE:
                 filename=filename or DEFAULT_WEIGHTS_FILENAME,
                 revision=revision,
             )
-        return _make(config, params, backend, device)
+        return _make(config, params, backend, device, dtype)
 
     @classmethod
     def load(
-        cls, path: str | Path, *, backend: Backend = "auto", device: str | None = None
+        cls,
+        path: str | Path,
+        *,
+        backend: Backend = "auto",
+        device: str | None = None,
+        dtype: DType = None,
     ) -> CODVAEBase:
         """Load a model from a local npz file written by :meth:`CODVAEBase.save`."""
         config, params = load_npz(path)
-        return _make(config, params, backend, device)
+        return _make(config, params, backend, device, dtype)
 
     @classmethod
     def from_torch_release(
@@ -168,10 +182,11 @@ class CODVAE:
         *,
         backend: Backend = "auto",
         device: str | None = None,
+        dtype: DType = None,
     ) -> CODVAEBase:
         """Load a model from an official COD-VAE release directory (requires torch)."""
         config, params = load_torch_release(weights_dir)
-        return _make(config, params, backend, device)
+        return _make(config, params, backend, device, dtype)
 
     @classmethod
     def from_random(
@@ -181,7 +196,8 @@ class CODVAE:
         *,
         backend: Backend = "auto",
         device: str | None = None,
+        dtype: DType = None,
     ) -> CODVAEBase:
         """Create a randomly initialized model (e.g. as a starting point for training)."""
         config = config if config is not None else CODVAEConfig()
-        return _make(config, init_params(config, seed=seed), backend, device)
+        return _make(config, init_params(config, seed=seed), backend, device, dtype)

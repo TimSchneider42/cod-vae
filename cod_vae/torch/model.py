@@ -268,8 +268,18 @@ class _Decoder(nn.Module):
 def _sample_planes(
     planes: torch.Tensor, queries: torch.Tensor, mode: str
 ) -> torch.Tensor:
-    """Sample triplanes (B, 3, C, R, R) at queries (B, N, 3); sum or multiply planes."""
-    queries = queries.clamp(-1, 0.999)
+    """
+    Sample triplanes (B, 3, C, R, R) at queries (B, N, 3); sum or multiply planes.
+
+    The interpolation always runs in float32, even for a half-precision model: the
+    gradient with respect to the query coordinates is a difference of adjacent texels,
+    which cancels catastrophically at half precision (measurably degrading the
+    bounding box gradients of :meth:`CODVAEModule.decode_logits_full`). The features are
+    returned in float32; callers feeding them to a half-precision head must cast them
+    back.
+    """
+    planes = planes.float()
+    queries = queries.float().clamp(-1, 0.999)
     result = None
     for axis in range(3):
         other = [j for j in range(3) if j != axis]
@@ -316,7 +326,7 @@ class CODVAEModule(nn.Module):
 
     def encode_moments(self, z_embed: torch.Tensor) -> torch.Tensor:
         """Posterior moments (B, L, 2 * latent_dim): mean and log-variance."""
-        return self.latent_proj_in(z_embed.float())
+        return self.latent_proj_in(z_embed.to(self.latent_proj_in[1].weight.dtype))
 
     def encode(self, pc: torch.Tensor) -> torch.Tensor:
         """Encode point clouds into posterior-mean latents (B, L, latent_dim)."""
@@ -342,9 +352,14 @@ class CODVAEModule(nn.Module):
     def decode_logits(
         self, planes: torch.Tensor, queries: torch.Tensor
     ) -> torch.Tensor:
-        """Occupancy logits (B, N) at query points (B, N, 3) in [-1, 1]^3."""
+        """
+        Occupancy logits (B, N) at query points (B, N, 3) in [-1, 1]^3, in the module's
+        dtype. The queries may be float32 for a half-precision module (see
+        :func:`_sample_planes`); only the head runs in the module's dtype.
+        """
         features = _sample_planes(planes, queries, mode="sum")
-        return self.autoencoder.head(features).squeeze(-1)
+        head = self.autoencoder.head
+        return head(features.to(head[0].weight.dtype)).squeeze(-1)
 
     def decode_uncertainty(
         self, uncertainty_planes: torch.Tensor, queries: torch.Tensor
@@ -391,12 +406,18 @@ class CODVAEModule(nn.Module):
         cube's boundary — callers optimizing the transform should penalize it
         directly instead. Pass ``stop_transform_gradient=False`` to differentiate
         through the query mapping anyway.
+
+        The query mapping runs in float32 for the same reason the interpolation does
+        (see :func:`_sample_planes`), so queries given in float32 keep their full
+        precision even for a half-precision module.
         """
         if stop_transform_gradient:
             center = center.detach()
             size = size.detach()
-        scale = object_scale / torch.clamp(size, min=1e-3)
-        cube_queries = (queries - center[:, None, :]) * scale[:, None, None]
+        scale = object_scale / torch.clamp(size.float(), min=1e-3)
+        cube_queries = (queries.float() - center.float()[:, None, :]) * scale[
+            :, None, None
+        ]
         return self.decode_logits(planes, cube_queries)
 
     def decode_full(
@@ -473,14 +494,26 @@ class CODVAETorch(CODVAEBase):
 
     backend = "torch"
 
-    def __init__(self, config: CODVAEConfig, params: Params, device: str | None = None):
+    def __init__(
+        self,
+        config: CODVAEConfig,
+        params: Params,
+        device: str | None = None,
+        dtype: str | torch.dtype | None = None,
+    ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
-        self.module = CODVAEModule(config).to(self.device).eval()
+        self.dtype = (
+            torch.float32
+            if dtype is None
+            else (dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype))
+        )
+        self.module = CODVAEModule(config).to(self.device, self.dtype).eval()
         super().__init__(config, params)
 
     def _load_params(self, params: Params) -> None:
+        # The checkpoint is float32; copy_ casts it to the module's dtype.
         state_dict = {
             key: torch.from_numpy(np_array.copy()) for key, np_array in params.items()
         }
@@ -488,18 +521,20 @@ class CODVAETorch(CODVAEBase):
 
     def get_params(self) -> Params:
         return {
-            key: value.detach().cpu().numpy()
+            key: value.detach().float().cpu().numpy()
             for key, value in self.module.state_dict().items()
         }
 
-    def _to_device(self, array) -> torch.Tensor:
+    def _to_device(self, array, dtype: "torch.dtype | None" = None) -> torch.Tensor:
+        """Move an array to the model's device, in the model's dtype unless overridden
+        (query points stay float32, see :func:`_sample_planes`)."""
         return torch.from_numpy(np.ascontiguousarray(array, dtype=np.float32)).to(
-            self.device
+            self.device, self.dtype if dtype is None else dtype
         )
 
     @torch.no_grad()
     def _encode(self, points):
-        return self.module.encode(self._to_device(points)).cpu().numpy()
+        return self.module.encode(self._to_device(points)).float().cpu().numpy()
 
     @torch.no_grad()
     def _decode_planes(self, latents):
@@ -507,7 +542,12 @@ class CODVAETorch(CODVAEBase):
 
     @torch.no_grad()
     def _decode_logits(self, planes, queries):
-        return self.module.decode_logits(planes, self._to_device(queries)).cpu().numpy()
+        return (
+            self.module.decode_logits(planes, self._to_device(queries, torch.float32))
+            .float()
+            .cpu()
+            .numpy()
+        )
 
     @torch.no_grad()
     def _decode_planes_full(self, full_latents):
@@ -521,8 +561,13 @@ class CODVAETorch(CODVAEBase):
         planes, center, size = handle
         return (
             self.module.decode_logits_full(
-                planes, center, size, self._to_device(queries), object_scale
+                planes,
+                center,
+                size,
+                self._to_device(queries, torch.float32),
+                object_scale,
             )
+            .float()
             .cpu()
             .numpy()
         )

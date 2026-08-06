@@ -36,6 +36,15 @@ class CODVAEBase(ABC):
     #: Name of the backend ("torch" or "jax"), set by subclasses.
     backend: str
 
+    #: Backend-native compute dtype of the model's parameters, set by subclasses. The
+    #: numpy interface converts to and from float32 regardless. Callers that hand
+    #: backend-native tensors to the model directly (e.g. differentiable losses) must
+    #: cast *latents* to this dtype themselves, but must leave *query points* in
+    #: float32: the triplane interpolation runs in float32 for any model dtype, as the
+    #: gradient with respect to the query coordinates cancels catastrophically in half
+    #: precision.
+    dtype: Any
+
     def __init__(self, config: CODVAEConfig, params: Params):
         self.config = config
         self._load_params(params)

@@ -463,8 +463,17 @@ def _grid_sample_plane(plane: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
 
 
 def _sample_planes(planes: jnp.ndarray, queries: jnp.ndarray, mode: str) -> jnp.ndarray:
-    """Sample triplanes (B, 3, C, R, R) at queries (B, N, 3); sum or multiply planes."""
-    queries = jnp.clip(queries, -1.0, 0.999)
+    """
+    Sample triplanes (B, 3, C, R, R) at queries (B, N, 3); sum or multiply planes.
+
+    The interpolation always runs in float32, even for a half-precision model: the
+    gradient with respect to the query coordinates is a difference of adjacent texels,
+    which cancels catastrophically at half precision (measurably degrading the
+    bounding box gradients of :func:`decode_logits_full`). The features are returned in
+    float32; callers feeding them to a half-precision head must cast them back.
+    """
+    planes = planes.astype(jnp.float32)
+    queries = jnp.clip(queries.astype(jnp.float32), -1.0, 0.999)
     result = None
     for axis in range(3):
         other_axes = [j for j in range(3) if j != axis]
@@ -487,9 +496,13 @@ def decode_logits(
 ) -> jnp.ndarray:
     """
     Evaluate occupancy logits (positive inside the object) at query points (B, N, 3) in
-    [-1, 1]^3 given triplane features from :func:`decode_planes`; returns (B, N).
+    [-1, 1]^3 given triplane features from :func:`decode_planes`; returns (B, N) in the
+    parameters' dtype. The queries may be float32 for a half-precision model (see
+    :func:`_sample_planes`); only the head runs in the parameters' dtype.
     """
-    features = _sample_planes(planes, queries, mode="sum")
+    features = _sample_planes(planes, queries, mode="sum").astype(
+        params["autoencoder.head.0.weight"].dtype
+    )
     x = _linear(params, "autoencoder.head.0", features)
     x = _linear(params, "autoencoder.head.2", _gelu(x))
     return x[..., 0]
@@ -540,12 +553,18 @@ def decode_logits_full(
     boundary — callers optimizing the transform should penalize it directly instead.
     Pass ``stop_transform_gradient=False`` to differentiate through the query mapping
     anyway.
+
+    The query mapping runs in float32 for the same reason the interpolation does (see
+    :func:`_sample_planes`), so queries given in float32 keep their full precision even
+    for a half-precision model.
     """
     if stop_transform_gradient:
         center = jax.lax.stop_gradient(center)
         size = jax.lax.stop_gradient(size)
-    scale = object_scale / jnp.maximum(size, 1e-3)
-    cube_queries = (queries - center[:, None, :]) * scale[:, None, None]
+    scale = object_scale / jnp.maximum(size.astype(jnp.float32), 1e-3)
+    cube_queries = (
+        queries.astype(jnp.float32) - center.astype(jnp.float32)[:, None, :]
+    ) * scale[:, None, None]
     return decode_logits(params, planes, cube_queries, config=config)
 
 
@@ -585,10 +604,11 @@ class CODVAEJax(CODVAEBase):
 
     backend = "jax"
 
-    def __init__(self, config: CODVAEConfig, params: Params, device=None):
+    def __init__(self, config: CODVAEConfig, params: Params, device=None, dtype=None):
         if isinstance(device, str):
             device = jax.devices(device)[0]
         self.device = device if device is not None else jax.devices()[0]
+        self.dtype = jnp.float32 if dtype is None else jnp.dtype(dtype)
         # Parameters are committed to the device below; jitted computations follow them.
         self._jit_encode = jax.jit(partial(encode, config=config))
         self._jit_decode_planes = jax.jit(partial(decode_planes, config=config))
@@ -608,22 +628,40 @@ class CODVAEJax(CODVAEBase):
 
     def _load_params(self, params: Params) -> None:
         self.params = {
-            key: jax.device_put(jnp.asarray(value, dtype=jnp.float32), self.device)
+            key: jax.device_put(jnp.asarray(value, dtype=self.dtype), self.device)
             for key, value in params.items()
         }
 
     def get_params(self) -> Params:
-        return {key: np.asarray(value) for key, value in self.params.items()}
+        return {
+            key: np.asarray(value, dtype=np.float32)
+            for key, value in self.params.items()
+        }
+
+    def _to_device(self, array, dtype=None) -> "jnp.ndarray":
+        """Move an array to the model's device, in the model's compute dtype unless
+        overridden. Inputs meant for the transformer must match that dtype, as jnp
+        promotion would otherwise silently compute in float32; query points instead
+        stay float32 (see :func:`_sample_planes`)."""
+        return jax.device_put(
+            jnp.asarray(array, dtype=self.dtype if dtype is None else dtype),
+            self.device,
+        )
 
     def _encode(self, points):
-        return np.asarray(self._jit_encode(self.params, jnp.asarray(points)))
+        return np.asarray(
+            self._jit_encode(self.params, self._to_device(points)), dtype=np.float32
+        )
 
     def _decode_planes(self, latents):
-        return self._jit_decode_planes(self.params, jnp.asarray(latents))
+        return self._jit_decode_planes(self.params, self._to_device(latents))
 
     def _decode_logits(self, planes, queries):
         return np.asarray(
-            self._jit_decode_logits(self.params, planes, jnp.asarray(queries))
+            self._jit_decode_logits(
+                self.params, planes, self._to_device(queries, jnp.float32)
+            ),
+            dtype=np.float32,
         )
 
     def _decode_planes_full(self, full_latents):
@@ -631,15 +669,21 @@ class CODVAEJax(CODVAEBase):
         latents = full_latents[:, :dims].reshape(
             -1, self.config.num_latents, self.config.latent_dim
         )
-        planes = self._jit_decode_planes(self.params, jnp.asarray(latents))
-        center = jnp.asarray(full_latents[:, dims : dims + 3])
-        size = jnp.asarray(full_latents[:, dims + 3])
+        planes = self._jit_decode_planes(self.params, self._to_device(latents))
+        center = self._to_device(full_latents[:, dims : dims + 3])
+        size = self._to_device(full_latents[:, dims + 3])
         return planes, center, size
 
     def _decode_logits_full(self, handle, queries, object_scale):
         planes, center, size = handle
         return np.asarray(
             self._jit_decode_logits_full(
-                self.params, planes, center, size, object_scale, jnp.asarray(queries)
-            )
+                self.params,
+                planes,
+                center,
+                size,
+                object_scale,
+                self._to_device(queries, jnp.float32),
+            ),
+            dtype=np.float32,
         )
