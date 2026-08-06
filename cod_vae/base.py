@@ -22,7 +22,9 @@ from .mesh import (
     grid_queries,
     normalize_to_cube,
     occupancy_grid_to_mesh,
+    pack_cube_transform,
     sample_surface_points,
+    unpack_cube_transform,
 )
 
 __all__ = ["CODVAEBase"]
@@ -252,11 +254,8 @@ class CODVAEBase(ABC):
             )
         transforms = np.stack(
             [
-                np.concatenate(
-                    [
-                        np.asarray(t.center, dtype=np.float64) / frame_half_size,
-                        [(object_scale / t.scale) / frame_half_size],
-                    ]
+                pack_cube_transform(
+                    t, frame_half_size=frame_half_size, object_scale=object_scale
                 )
                 for t in transform
             ]
@@ -291,9 +290,8 @@ class CODVAEBase(ABC):
             -1, self.config.num_latents, self.config.latent_dim
         )
         transforms = [
-            CubeTransform(
-                center=np.asarray(row[:3], dtype=np.float64) * frame_half_size,
-                scale=object_scale / (max(float(row[3]), 1e-3) * frame_half_size),
+            unpack_cube_transform(
+                row, frame_half_size=frame_half_size, object_scale=object_scale
             )
             for row in full_latents[:, dims:]
         ]

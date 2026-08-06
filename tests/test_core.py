@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 
 from cod_vae import CODVAEConfig, init_params, load_npz, save_npz
-from cod_vae.mesh import grid_queries, normalize_to_cube, occupancy_grid_to_mesh
+from cod_vae.mesh import (
+    grid_queries,
+    normalize_to_cube,
+    occupancy_grid_to_mesh,
+    pack_cube_transform,
+    points_to_cube_transform,
+    unpack_cube_transform,
+)
 
 
 def test_config_roundtrip():
@@ -39,6 +46,30 @@ def test_normalize_to_cube(meshes):
     assert np.abs(normalized.vertices).max() == pytest.approx(0.9, abs=1e-6)
     restored = transform.apply_inverse(np.asarray(normalized.vertices))
     np.testing.assert_allclose(restored, meshes[0].vertices, atol=1e-6)
+
+
+def test_points_to_cube_transform(meshes):
+    _, reference = normalize_to_cube(meshes[0], object_scale=0.9)
+    transform = points_to_cube_transform(np.asarray(meshes[0].vertices), 0.9)
+    np.testing.assert_array_equal(transform.center, reference.center)
+    assert transform.scale == reference.scale
+    # A subset of points with the same bounding box (e.g. convex hull vertices)
+    # yields the identical transform.
+    hull = points_to_cube_transform(np.asarray(meshes[0].convex_hull.vertices), 0.9)
+    np.testing.assert_allclose(hull.center, reference.center, atol=1e-12)
+    assert hull.scale == pytest.approx(reference.scale, rel=1e-12)
+
+
+def test_pack_cube_transform_roundtrip(meshes):
+    _, transform = normalize_to_cube(meshes[0], object_scale=0.9)
+    row = pack_cube_transform(transform, frame_half_size=0.06, object_scale=0.9)
+    assert row.shape == (4,)
+    # size is the maximum half-extent of the geometry, normalized by frame_half_size.
+    assert row[3] == pytest.approx(np.max(meshes[0].extents / 2) / 0.06, rel=1e-6)
+    np.testing.assert_allclose(row[:3], np.asarray(transform.center) / 0.06, rtol=1e-12)
+    restored = unpack_cube_transform(row, frame_half_size=0.06, object_scale=0.9)
+    np.testing.assert_allclose(restored.center, transform.center, rtol=1e-12)
+    assert restored.scale == pytest.approx(transform.scale, rel=1e-6)
 
 
 def test_occupancy_grid_to_mesh():

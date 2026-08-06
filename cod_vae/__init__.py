@@ -32,7 +32,14 @@ from .base import CODVAEBase
 from .checkpoint import Params, load_npz, load_torch_release, save_npz
 from .config import CODVAEConfig
 from .init import init_params
-from .mesh import CubeTransform, normalize_to_cube, occupancy_grid_to_mesh
+from .mesh import (
+    CubeTransform,
+    normalize_to_cube,
+    occupancy_grid_to_mesh,
+    pack_cube_transform,
+    points_to_cube_transform,
+    unpack_cube_transform,
+)
 
 if TYPE_CHECKING:
     from .jax import CODVAEJax
@@ -49,7 +56,10 @@ __all__ = [
     "load_torch_release",
     "normalize_to_cube",
     "occupancy_grid_to_mesh",
+    "pack_cube_transform",
+    "points_to_cube_transform",
     "save_npz",
+    "unpack_cube_transform",
 ]
 
 Backend = Literal["auto", "torch", "jax"]
