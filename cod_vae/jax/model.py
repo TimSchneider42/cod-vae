@@ -524,6 +524,7 @@ def decode_logits_full(
     *,
     config: CODVAEConfig,
     object_scale: float = 0.9,
+    stop_transform_gradient: bool = True,
 ) -> jnp.ndarray:
     """
     Evaluate occupancy logits (B, N) at query points (B, N, 3) given in the [-1, 1]
@@ -531,7 +532,18 @@ def decode_logits_full(
     center (B, 3) and size (B,) of a full latent (same frame). Sizes are clamped to
     1e-3 to guard against (near-)zero size values, which would yield an infinite
     cube scale.
+
+    By default (``stop_transform_gradient``), center and size are excluded from the
+    gradient: their only gradient path is the triplane interpolation of the mapped
+    queries, which is piecewise-constant at the texel scale, noisy under query
+    subsampling, and identically zero once the queries are clamped to the cube's
+    boundary — callers optimizing the transform should penalize it directly instead.
+    Pass ``stop_transform_gradient=False`` to differentiate through the query mapping
+    anyway.
     """
+    if stop_transform_gradient:
+        center = jax.lax.stop_gradient(center)
+        size = jax.lax.stop_gradient(size)
     scale = object_scale / jnp.maximum(size, 1e-3)
     cube_queries = (queries - center[:, None, :]) * scale[:, None, None]
     return decode_logits(params, planes, cube_queries, config=config)
@@ -544,18 +556,27 @@ def decode_full(
     *,
     config: CODVAEConfig,
     object_scale: float = 0.9,
+    stop_transform_gradient: bool = True,
 ) -> jnp.ndarray:
     """
     Evaluate occupancy logits (B, N) of full latents
     (B, num_latents * latent_dim + 4) at query points (B, N, 3) given in the [-1, 1]
-    normalized world frame. Differentiable with respect to the full latent, including
-    its bounding box center and size entries (whose gradients flow through the
-    triplane interpolation).
+    normalized world frame. Differentiable with respect to the latent part; the
+    bounding box center and size entries are excluded from the gradient by default
+    (see :func:`decode_logits_full` for the rationale and
+    ``stop_transform_gradient=False`` to differentiate through them).
     """
     latent, center, size = split_full_latent(full_latent, config=config)
     planes = decode_planes(params, latent, config=config)
     return decode_logits_full(
-        params, planes, center, size, queries, config=config, object_scale=object_scale
+        params,
+        planes,
+        center,
+        size,
+        queries,
+        config=config,
+        object_scale=object_scale,
+        stop_transform_gradient=stop_transform_gradient,
     )
 
 

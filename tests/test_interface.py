@@ -131,6 +131,50 @@ def test_full_latent_roundtrip(model, meshes):
         model.unpack_full_latent(full[:, :-1])
 
 
+def test_decode_full_transform_gradient(model, meshes):
+    """
+    By default, decode_full excludes the bounding box center and size entries from
+    the gradient; stop_transform_gradient=False restores the gradient through the
+    query mapping. The latent part's gradient is unaffected either way.
+    """
+    full = model.encode_mesh_full(meshes, num_points=256, seed=0)
+    rng = np.random.default_rng(11)
+    queries = np.stack(
+        [
+            rng.uniform(mesh.bounds[0], mesh.bounds[1], (123, 3)).astype(np.float32)
+            for mesh in meshes
+        ]
+    )
+    if model.backend == "jax":
+        import jax
+
+        def grad(**kwargs):
+            from cod_vae.jax import decode_full
+
+            return np.asarray(
+                jax.grad(
+                    lambda f: decode_full(
+                        model.params, f, queries, config=model.config, **kwargs
+                    ).sum()
+                )(full)
+            )
+
+        stopped, open_ = grad(), grad(stop_transform_gradient=False)
+    else:
+        import torch
+
+        def grad(**kwargs):
+            f = torch.from_numpy(full).to(model.device).requires_grad_(True)
+            q = torch.from_numpy(queries).to(model.device)
+            model.module.decode_full(f, q, **kwargs).sum().backward()
+            return f.grad.cpu().numpy()
+
+        stopped, open_ = grad(), grad(stop_transform_gradient=False)
+    assert np.all(stopped[:, -4:] == 0.0)
+    assert np.any(open_[:, -4:] != 0.0)
+    np.testing.assert_allclose(stopped[:, :-4], open_[:, :-4], atol=1e-6)
+
+
 def test_decode_full(model, meshes):
     full = model.encode_mesh_full(meshes, num_points=256, seed=0)
     latents, transforms = model.unpack_full_latent(full)
@@ -194,10 +238,11 @@ def test_decode_full_backend_native(model, meshes):
         grad = np.asarray(jax.grad(loss)(full))
     np.testing.assert_allclose(backend_logits, reference, atol=1e-3)
     assert np.all(np.isfinite(grad))
-    # Gradients must flow into the latent as well as the center/size entries.
+    # Gradients must flow into the latent; the center/size entries are excluded by
+    # default (see test_decode_full_transform_gradient for both modes).
     dims = model.config.num_latents * model.config.latent_dim
     assert np.any(grad[:, :dims] != 0.0)
-    assert np.any(grad[:, dims:] != 0.0)
+    assert np.all(grad[:, dims:] == 0.0)
 
 
 def test_decode_mesh_full(model, meshes):
