@@ -137,8 +137,27 @@ def _attention(
 
     q, k, v = split_heads(q), split_heads(k), split_heads(v)
     if attn_impl == "cudnn":
+        # cuDNN rejects odd sequence lengths on the backward pass, and the decoder's
+        # token count is always odd: 3 * plane_resolution ** 2 patches plus one register
+        # token. Pad to even and mask the padded key so it contributes nothing. The
+        # padded query row still attends to real keys, so its softmax is well defined
+        # (a fully masked row would produce NaNs that survive into the gradient); it is
+        # sliced off below.
+        query_len, source_len = q.shape[1], k.shape[1]
+        pad_query, pad_source = query_len % 2, source_len % 2
+        mask = None
+        if pad_query or pad_source:
+            pad = ((0, 0), (0, 1), (0, 0), (0, 0))
+            if pad_query:
+                q = jnp.pad(q, pad)
+            if pad_source:
+                k, v = jnp.pad(k, pad), jnp.pad(v, pad)
+                mask = jnp.ones((1, 1, q.shape[1], k.shape[1]), dtype=bool)
+                mask = mask.at[..., -1].set(False)
         # Default scale is 1/sqrt(head_dim), matching the manual path.
-        out = jax.nn.dot_product_attention(q, k, v, implementation="cudnn")
+        out = jax.nn.dot_product_attention(q, k, v, mask=mask, implementation="cudnn")[
+            :, :query_len
+        ]
     else:
         q, k, v = (x.transpose(0, 2, 1, 3) for x in (q, k, v))
         scores = q @ k.transpose(0, 1, 3, 2) / math.sqrt(q.shape[-1])
