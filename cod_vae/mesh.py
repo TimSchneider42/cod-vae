@@ -167,7 +167,26 @@ def _warp_cuda_available() -> bool:
     """Whether a CUDA device Warp can use is present. Cached: it cannot change within a
     process, and ``wp.init()`` is not cheap."""
     wp.init()
-    return wp.get_cuda_device_count() > 0
+    if wp.get_cuda_device_count() == 0:
+        return False
+    for device in wp.get_cuda_devices():
+        if wp.is_mempool_supported(device):
+            # Return freed blocks to the driver instead of retaining them in Warp's
+            # pool. Warp shares the GPU with the model's own framework, which typically
+            # wants all of it (jax preallocates by default), while marching cubes needs
+            # only a few tens of MB -- so Warp should hold as little as possible.
+            wp.set_mempool_release_threshold(device, 0)
+    return True
+
+
+@lru_cache(maxsize=8)
+def _marching_cubes(resolution: int) -> Any:
+    """
+    Cached surface extractor per resolution. Its scratch buffers scale with
+    ``resolution ** 3``, so constructing one per call would reallocate them for every
+    mesh. Not thread-safe: the extractor owns the output arrays it writes into.
+    """
+    return wp.MarchingCubes(nx=resolution, ny=resolution, nz=resolution)
 
 
 def _to_warp_field(logits: Any) -> Any:
@@ -206,7 +225,7 @@ def occupancy_grid_to_mesh_warp(
     resolution = field.shape[0]
     # max_verts/max_tris/device are deprecated in warp 1.16 and removed in 1.19; the
     # output arrays size themselves.
-    mc = wp.MarchingCubes(nx=resolution, ny=resolution, nz=resolution)
+    mc = _marching_cubes(resolution)
     mc.surface(field, 0.0)
     vertices = mc.verts.numpy()
     if len(vertices) == 0:
