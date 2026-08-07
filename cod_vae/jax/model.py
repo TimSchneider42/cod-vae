@@ -746,6 +746,32 @@ def _resolve_attention(
             str(e).splitlines()[0][:120],
         )
         return "default"
+
+    # The forward probe above is not sufficient. jax's vmap batching rule for the fused
+    # kernel's BACKWARD pass (_dot_product_attention_bwd_batcher) derives one flattened
+    # batch size from the query alone and then reshapes the cotangent to it:
+    #     *Bs, T, N, _ = query.shape ; B = math.prod(Bs)
+    #     grad_output = jnp.reshape(grad_output, (B,) + query.shape[-3:])
+    # That is only valid when query and grad_output carry the same mapped axes. When the
+    # decoder is differentiated under a critic ensemble, the ensemble maps the downstream
+    # parameters while the query tokens stay shared, so the cotangent gains an axis the
+    # query never had and the reshape fails. Probe that shape exactly -- mapped weights,
+    # shared q/k/v -- rather than assume the kernel is usable because it compiles forward.
+    def _probe_loss(w, q, k, v):
+        out = jax.nn.dot_product_attention(q, k, v, implementation="cudnn")
+        return jnp.sum((out @ w).astype(jnp.float32))
+
+    try:
+        jax.jit(
+            jax.vmap(jax.grad(_probe_loss, argnums=0), in_axes=(0, None, None, None))
+        ).lower(jax.ShapeDtypeStruct((2, 8, 8), dtype), probe, probe, probe).compile()
+    except Exception as e:
+        logger.info(
+            "Attention: using the default kernel (cuDNN's fused kernel is unusable "
+            "under a vmapped backward pass here: %s).",
+            str(e).splitlines()[-1][:160],
+        )
+        return "default"
     logger.info("Attention: using cuDNN's fused kernel.")
     return "cudnn"
 
