@@ -134,12 +134,25 @@ def _attention(
     k = source @ weight[embed_dim : 2 * embed_dim].T + bias[embed_dim : 2 * embed_dim]
     v = source @ weight[2 * embed_dim :].T + bias[2 * embed_dim :]
 
-    def split_heads(x: jnp.ndarray) -> jnp.ndarray:
+    # The decoder is reached with a varying number of leading batch-like axes: (B, N, C)
+    # from the inference path, but (E, B, N, C) from the critic loss, where E is CrossQ's
+    # stacked critic ensemble. Both branches below want exactly one batch axis -- cuDNN's
+    # kernel takes rank 4, and the manual path's transposes are written for it -- so
+    # collapse whatever leading axes the caller has into one here and restore them at the
+    # end. Broadcasting first lets cross-attention pair a per-ensemble query with a shared
+    # source.
+    lead = jnp.broadcast_shapes(q.shape[:-2], k.shape[:-2])
+    query_len, source_len = q.shape[-2], k.shape[-2]
+    head_dim = embed_dim // num_heads
+
+    def split_heads(x: jnp.ndarray, length: int) -> jnp.ndarray:
         # (B, N, H, D); the manual path transposes to (B, H, N, D) below, the fused one
         # takes this layout directly.
-        return x.reshape(*x.shape[:2], num_heads, -1)
+        x = jnp.broadcast_to(x, (*lead, length, x.shape[-1]))
+        return x.reshape(-1, length, num_heads, head_dim)
 
-    q, k, v = split_heads(q), split_heads(k), split_heads(v)
+    q = split_heads(q, query_len)
+    k, v = split_heads(k, source_len), split_heads(v, source_len)
     if attn_impl == "cudnn":
         # cuDNN rejects odd sequence lengths on the backward pass, and the decoder's
         # token count is always odd: 3 * plane_resolution ** 2 patches plus one register
@@ -147,7 +160,6 @@ def _attention(
         # padded query row still attends to real keys, so its softmax is well defined
         # (a fully masked row would produce NaNs that survive into the gradient); it is
         # sliced off below.
-        query_len, source_len = q.shape[1], k.shape[1]
         pad_query, pad_source = query_len % 2, source_len % 2
         mask = None
         if pad_query or pad_source:
@@ -166,7 +178,7 @@ def _attention(
         q, k, v = (x.transpose(0, 2, 1, 3) for x in (q, k, v))
         scores = q @ k.transpose(0, 1, 3, 2) / math.sqrt(q.shape[-1])
         out = (jax.nn.softmax(scores, axis=-1) @ v).transpose(0, 2, 1, 3)
-    out = out.reshape(*query.shape[:2], embed_dim)
+    out = out.reshape(*lead, query_len, embed_dim)
     return _linear(params, f"{name}.out_proj", out)
 
 
