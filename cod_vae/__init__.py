@@ -38,6 +38,7 @@ from .mesh import (
     occupancy_grid_to_mesh,
     pack_cube_transform,
     points_to_cube_transform,
+    sample_surface_points,
     unpack_cube_transform,
 )
 
@@ -58,6 +59,7 @@ __all__ = [
     "occupancy_grid_to_mesh",
     "pack_cube_transform",
     "points_to_cube_transform",
+    "sample_surface_points",
     "save_npz",
     "unpack_cube_transform",
 ]
