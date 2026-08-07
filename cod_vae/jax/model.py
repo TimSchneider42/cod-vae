@@ -747,36 +747,41 @@ def _resolve_attention(
         )
         return "default"
 
-    # The forward probe above is not sufficient. jax's vmap batching rule for the fused
-    # kernel's BACKWARD pass (_dot_product_attention_bwd_batcher) derives one flattened
-    # batch size from the query alone and then reshapes the cotangent to it:
-    #     *Bs, T, N, _ = query.shape ; B = math.prod(Bs)
-    #     grad_output = jnp.reshape(grad_output, (B,) + query.shape[-3:])
-    # That is only valid when query and grad_output carry the same mapped axes. When the
-    # decoder is differentiated under a critic ensemble, the ensemble maps the projection
-    # weights, so the cotangent gains an axis; whether the QUERY gains it too decides
-    # whether the reshape is consistent.
-    #
-    # The mapped weight must therefore FLOW INTO the operands, exactly as it does in the
-    # real decoder where q/k/v come out of the mapped in_proj. A probe that maps a weight
-    # used only downstream of the attention leaves q/k/v unmapped, no asymmetry reaches the
-    # batcher, and cuDNN compiles happily -- the probe then certifies a kernel that dies in
-    # training. Hence `q * w` here rather than a bare `out @ w`.
+    # The forward probe above is not sufficient: the fused kernel's backward pass has its own
+    # failure modes, so probe a gradient too, with the differentiated weight FEEDING q exactly
+    # as the decoder's in_proj does.
     def _probe_loss(w, q, k, v):
         out = jax.nn.dot_product_attention(q * w, k, v, implementation="cudnn")
         return jnp.sum(out.astype(jnp.float32))
 
     try:
-        jax.jit(
-            jax.vmap(jax.grad(_probe_loss, argnums=0), in_axes=(0, None, None, None))
-        ).lower(jax.ShapeDtypeStruct((2,), dtype), probe, probe, probe).compile()
+        jax.jit(jax.grad(_probe_loss, argnums=0)).lower(
+            jnp.array(1.0, dtype), probe, probe, probe
+        ).compile()
     except Exception as e:
         logger.info(
-            "Attention: using the default kernel (cuDNN's fused kernel is unusable "
-            "under a vmapped backward pass here: %s).",
+            "Attention: using the default kernel (cuDNN's fused backward pass is "
+            "unusable here: %s).",
             str(e).splitlines()[-1][:160],
         )
         return "default"
+
+    # KNOWN LIMITATION, deliberately not probed. jax's vmap rule for the fused BACKWARD
+    # pass (_dot_product_attention_bwd_batcher) sizes the cotangent reshape from the query
+    # alone:
+    #     *Bs, T, N, _ = query.shape ; B = math.prod(Bs)
+    #     grad_output = jnp.reshape(grad_output, (B,) + query.shape[-3:])
+    # which is only valid when query and cotangent carry the same mapped axes. Differentiate
+    # this under vmap with the mapped weight feeding q -- as jax.jacobian does, since jacrev
+    # vmaps the backward over output components -- and it raises. Verified on jax 0.6.2 and
+    # 0.10.2 alike, so it is not a version to wait out.
+    #
+    # Callers must therefore not vmap a backward pass through this model. That is a real
+    # constraint on the training loop, not a detail: it is why the trainer takes its two
+    # gradients as one vjp applied twice rather than with jax.jacobian. Probing it here would
+    # be wrong -- it would disable the fused kernel for every caller because of a pattern the
+    # trainer no longer uses -- but a caller who reintroduces it gets a trace-time crash with
+    # the reshape error above, which is loud and immediate rather than silent.
     logger.info("Attention: using cuDNN's fused kernel.")
     return "cudnn"
 
