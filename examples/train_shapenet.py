@@ -11,12 +11,25 @@ Multi-GPU:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 from dataclasses import replace
 from pathlib import Path
 
 from cod_vae import CODVAEConfig, load_npz
 from cod_vae.init import adapt_params
 from cod_vae.training import ShapeNetVecSetDataset, TrainingConfig
+
+
+def _parse_arch(entries: list[str]) -> dict:
+    """Parse --arch FIELD=VALUE overrides, typed against CODVAEConfig's fields."""
+    fields = {f.name: f.type for f in dataclasses.fields(CODVAEConfig)}
+    overrides = {}
+    for entry in entries:
+        name, _, value = entry.partition("=")
+        if name not in fields:
+            raise SystemExit(f"--arch: {name} is not a CODVAEConfig field")
+        overrides[name] = float(value) if "float" in str(fields[name]) else int(value)
+    return overrides
 
 
 def main() -> None:
@@ -49,6 +62,16 @@ def main() -> None:
         help="width of each latent vector (default 32). Only the latent VAE's "
         "projections depend on it, and stage 1 never trains those, so several stage-2 "
         "models with different widths can share one stage-1 checkpoint",
+    )
+    parser.add_argument(
+        "--arch",
+        action="append",
+        default=[],
+        metavar="FIELD=VALUE",
+        help="override a CODVAEConfig field (e.g. --arch embed_dim=256 --arch "
+        "num_heads=4). The autoencoder's architecture is baked into checkpoints, so "
+        "with --init-from only fields that shape the latent VAE modules (latent_dim, "
+        "num_latent_layers, latent_mlp_ratio) may differ from the checkpoint's",
     )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument(
@@ -87,6 +110,9 @@ def main() -> None:
     if (args.resume or args.tf32) and args.backend != "torch":
         parser.error("--resume and --tf32 are only supported by the torch backend")
 
+    arch = _parse_arch(args.arch)
+    if args.latent_dim is not None:
+        arch["latent_dim"] = args.latent_dim
     params = None
     if args.init_from is not None:
         config, params = load_npz(args.init_from)
@@ -96,13 +122,27 @@ def main() -> None:
                 f"not {args.num_latents}: the autoencoder attends from that many tokens, "
                 f"so a different count needs its own stage-1 run"
             )
-        if args.latent_dim is not None and args.latent_dim != config.latent_dim:
-            config = replace(config, latent_dim=args.latent_dim)
+        mismatched = {
+            name: value
+            for name, value in arch.items()
+            if getattr(config, name) != value
+        }
+        # Fields that only shape the latent VAE modules may differ from the checkpoint:
+        # stage 1 never trains those, so they are drawn fresh (adapt_params) and the
+        # autoencoder carries over untouched. Everything else is baked in by stage 1.
+        latent_only = {"latent_dim", "num_latent_layers", "latent_mlp_ratio"}
+        fixed = {k: v for k, v in mismatched.items() if k not in latent_only}
+        if fixed:
+            parser.error(
+                f"{args.init_from} was trained with a different architecture than "
+                f"--arch requests ({fixed}); these fields are fixed by the stage-1 run"
+            )
+        if mismatched:
+            config = replace(config, **mismatched)
             params, reinitialized = adapt_params(params, config, seed=args.seed)
             print(
-                f"latent_dim {args.latent_dim} instead of the checkpoint's: "
-                f"re-initialized {len(reinitialized)} parameters "
-                f"({', '.join(reinitialized)})"
+                f"adapting checkpoint to {mismatched}: re-initialized "
+                f"{len(reinitialized)} parameters ({', '.join(reinitialized)})"
             )
     else:
         if args.stage == 2:
@@ -110,6 +150,7 @@ def main() -> None:
         config = CODVAEConfig(
             num_latents=args.num_latents if args.num_latents is not None else 32,
             latent_dim=args.latent_dim if args.latent_dim is not None else 32,
+            **arch,
         )
 
     train_config = TrainingConfig(
