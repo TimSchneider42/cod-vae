@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from cod_vae.training import ShapeNetVecSetDataset
+from cod_vae.training import ShapeNetVecSetDataset, TrainingConfig
 
 
 @pytest.fixture()
@@ -64,7 +64,6 @@ def test_vecset_dataset(vecset_root):
 def test_vecset_dataset_trains(vecset_root, tiny_config):
     pytest.importorskip("torch")
     from cod_vae.torch.training import train
-    from cod_vae.training import TrainingConfig
 
     dataset = ShapeNetVecSetDataset(
         vecset_root,

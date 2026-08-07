@@ -14,9 +14,14 @@ import numpy as np
 import pytest
 import trimesh
 
-from cod_vae import CODVAEConfig
+from cod_vae import CODVAE, CODVAEConfig
 from cod_vae.init import LATENT_PREFIXES, adapt_params, init_params
-from cod_vae.training import MeshOccupancyDataset, SdfGenSettings, TrainingConfig
+from cod_vae.training import (
+    MeshOccupancyDataset,
+    SdfGenSettings,
+    TrainingConfig,
+    iterate_batches,
+)
 
 # Mesh-based training preprocesses with the sdf_gen recipe, which needs pcu.
 pytest.importorskip("point_cloud_utils")
@@ -94,8 +99,6 @@ def test_training_step_updates_correct_params(backend, stage, tiny_config, datas
     train_config = TrainingConfig(
         stage=stage, epochs=1, batch_size=2, log_every=1000, seed=0
     )
-    from cod_vae import init_params
-
     params = init_params(tiny_config, seed=0)
     if backend == "torch":
         from cod_vae.torch.training import train
@@ -145,9 +148,6 @@ def test_stage1_loss_decreases(backend, dataset):
         log_every=1000,
         seed=0,
     )
-    from cod_vae import CODVAE, init_params
-    from cod_vae.training.data import iterate_batches
-
     params = init_params(config, seed=0)
 
     def stage1_loss(model_params):

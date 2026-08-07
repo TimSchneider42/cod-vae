@@ -39,6 +39,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
+import trimesh
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # progress bars are optional (cod-vae[preprocess])
+    tqdm = None
 
 __all__ = [
     "MESH_SUFFIXES",
@@ -79,6 +85,17 @@ def _require_point_cloud_utils():
     return point_cloud_utils
 
 
+def _require_datasets():
+    try:
+        import datasets
+    except ImportError as exc:
+        raise ImportError(
+            "Hugging Face sources require the datasets package; install it via "
+            "pip install cod-vae[preprocess]"
+        ) from exc
+    return datasets
+
+
 @dataclass(frozen=True)
 class SdfGenSettings:
     """
@@ -106,8 +123,6 @@ def is_closed_mesh(vertices: np.ndarray, faces: np.ndarray) -> bool:
     consistent winding. Vertices that coincide are merged first, since a surface split
     along a seam is still closed geometrically, which is all the occupancy query needs.
     """
-    import trimesh
-
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
     return bool(mesh.is_watertight and mesh.is_winding_consistent)
 
@@ -464,7 +479,7 @@ def _load_hf_splits(dataset: str, split_map: Mapping[str, str] | None) -> dict:
     Load the relevant splits of a Hugging Face mesh dataset (local save_to_disk /
     load_dataset path or Hub repository id) as {source_split: datasets.Dataset}.
     """
-    import datasets
+    datasets = _require_datasets()
 
     path = Path(dataset)
     if path.exists():
@@ -485,8 +500,6 @@ def _process_object(task: tuple) -> None:
     """Preprocess and write one mesh (module-level so worker processes can pickle it)."""
     root, category, object_id, mesh, settings, seed, extras = task
     if isinstance(mesh, str):
-        import trimesh
-
         loaded = trimesh.load(mesh, skip_materials=True, process=True, force="mesh")
         vertices, faces = loaded.vertices, loaded.faces
     else:
@@ -549,11 +562,7 @@ def _new_pool(workers: int) -> ProcessPoolExecutor:
 
 def _progress_bar(total: int, desc: str, unit: str, enabled: bool):
     """A tqdm bar, or None if tqdm is unavailable or there is nothing to show."""
-    if not enabled or total == 0:
-        return None
-    try:
-        from tqdm.auto import tqdm
-    except ImportError:
+    if not enabled or total == 0 or tqdm is None:
         return None
     return tqdm(total=total, desc=desc, unit=unit, dynamic_ncols=True)
 

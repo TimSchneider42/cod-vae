@@ -15,7 +15,8 @@ from typing import Any, Sequence
 import numpy as np
 import trimesh
 
-from .checkpoint import Params
+from . import hub
+from .checkpoint import Params, save_npz
 from .config import CODVAEConfig
 from .mesh import (
     CubeTransform,
@@ -490,15 +491,11 @@ class CODVAEBase(ABC):
 
     def save(self, path) -> None:
         """Save config and parameters to a self-contained npz file."""
-        from .checkpoint import save_npz
-
         save_npz(path, self.config, self.get_params())
 
     def push_to_hub(self, repo_id: str, **kwargs) -> str:
         """Upload config and parameters to a Hugging Face Hub model repository."""
-        from .hub import push_to_hub
-
-        return push_to_hub(repo_id, self.config, self.get_params(), **kwargs)
+        return hub.push_to_hub(repo_id, self.config, self.get_params(), **kwargs)
 
     def __repr__(self) -> str:
         return (

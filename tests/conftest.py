@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 import pytest
 import trimesh
@@ -38,8 +40,6 @@ def tiny_params(tiny_config):
 @pytest.fixture(scope="session")
 def tiny_deterministic_config(tiny_config) -> CODVAEConfig:
     """Tiny config without stochastic depth, for cross-backend loss comparisons."""
-    import dataclasses
-
     return dataclasses.replace(tiny_config, droppath_rate=0.0)
 
 

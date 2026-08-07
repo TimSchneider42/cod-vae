@@ -8,8 +8,16 @@ import pytest
 
 torch = pytest.importorskip("torch")
 jax = pytest.importorskip("jax")
+# cod_vae.jax.training (the loss-parity tests) requires optax, the train extra.
+pytest.importorskip("optax")
+
+import jax.numpy as jnp
 
 from cod_vae import CODVAE
+from cod_vae.jax.training import _stage1_loss, _stage2_loss
+from cod_vae.torch.model import CODVAEModule
+from cod_vae.torch.training import _LossModule
+from cod_vae.training import TrainingConfig
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -82,11 +90,6 @@ def _loss_batch(num_vol=64, num_near=64, batch_size=2, num_points=256):
 
 
 def test_stage1_loss_parity(tiny_deterministic_config, tiny_params):
-    from cod_vae.jax.training import _stage1_loss
-    from cod_vae.torch.model import CODVAEModule
-    from cod_vae.torch.training import _LossModule
-    from cod_vae.training import TrainingConfig
-
     batch, num_vol = _loss_batch()
     train_config = TrainingConfig(stage=1)
 
@@ -100,8 +103,6 @@ def test_stage1_loss_parity(tiny_deterministic_config, tiny_params):
         out_torch = loss_module(
             *(torch.from_numpy(batch[k]) for k in ("surface", "queries", "labels"))
         )
-
-    import jax.numpy as jnp
 
     trainable = {k: jnp.asarray(v) for k, v in tiny_params.items()}
     loss_jax, metrics_jax = _stage1_loss(
@@ -119,11 +120,6 @@ def test_stage1_loss_parity(tiny_deterministic_config, tiny_params):
 
 
 def test_stage2_loss_parity(tiny_deterministic_config, tiny_params, monkeypatch):
-    from cod_vae.jax.training import _stage2_loss
-    from cod_vae.torch.model import CODVAEModule
-    from cod_vae.torch.training import _LossModule
-    from cod_vae.training import TrainingConfig
-
     batch, num_vol = _loss_batch()
     train_config = TrainingConfig(stage=2)
 
@@ -145,8 +141,6 @@ def test_stage2_loss_parity(tiny_deterministic_config, tiny_params, monkeypatch)
         out_torch = loss_module(
             *(torch.from_numpy(batch[k]) for k in ("surface", "queries", "labels"))
         )
-
-    import jax.numpy as jnp
 
     params_jax = {k: jnp.asarray(v) for k, v in tiny_params.items()}
     loss_jax, metrics_jax = _stage2_loss(

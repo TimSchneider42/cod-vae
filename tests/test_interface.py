@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import trimesh
 
-from cod_vae import CODVAE, CODVAEBase
+from cod_vae import CODVAE, CODVAEBase, CubeTransform
 
 
 @pytest.fixture(scope="module", params=["torch", "jax"])
@@ -75,8 +75,6 @@ def test_decode_planes_logits_reject_unbatched(model, point_batch):
 
 
 def test_full_latent_roundtrip(model, meshes):
-    from cod_vae import CubeTransform
-
     full = model.encode_mesh_full(meshes, num_points=256, seed=0)
     assert full.shape == (len(meshes), model.full_latent_size)
 

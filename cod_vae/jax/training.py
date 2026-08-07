@@ -18,6 +18,14 @@ from typing import Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
+
+try:
+    import optax
+except ImportError as e:
+    raise ImportError(
+        "Training requires optax; install it via pip install cod-vae[train]"
+    ) from e
 
 from ..checkpoint import Params, save_npz
 from ..config import CODVAEConfig
@@ -178,9 +186,6 @@ def train(
     checkpoint ("checkpoint_epoch_*.npz" and "checkpoint_last.npz") is written after
     every epoch. Training is data-parallel across all (or the given) local devices.
     """
-    import optax
-    from jax.sharding import Mesh, NamedSharding, PartitionSpec
-
     if devices is None:
         devices = jax.devices()
     mesh = Mesh(np.array(devices), ("data",))

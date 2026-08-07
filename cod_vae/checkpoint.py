@@ -33,8 +33,16 @@ def load_torch_release(weights_dir: Path | str) -> tuple[CODVAEConfig, Params]:
     Load an official COD-VAE release directory containing config.yaml and a *.pt
     checkpoint (e.g. the released vae_m32 or vae_m64 folders). Requires torch and pyyaml.
     """
-    import torch
-    import yaml
+    # Deferred: this module is imported by `import cod_vae` and must stay usable
+    # without the convert extra (and without paying the torch import on every use).
+    try:
+        import torch
+        import yaml
+    except ImportError as e:
+        raise ImportError(
+            "Loading an official release requires torch and pyyaml; install them "
+            "via pip install cod-vae[convert]"
+        ) from e
 
     weights_dir = Path(weights_dir)
     with (weights_dir / "config.yaml").open() as f:

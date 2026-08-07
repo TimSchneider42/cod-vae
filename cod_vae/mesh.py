@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import trimesh
+from skimage import measure
 
 __all__ = [
     "CubeTransform",
@@ -135,8 +136,6 @@ def occupancy_grid_to_mesh(
     cubes. If a transform is given, the mesh is mapped back into the original frame.
     Returns an empty mesh if the grid contains no sign change.
     """
-    from skimage import measure
-
     if logits.min() >= 0 or logits.max() <= 0:
         return trimesh.Trimesh()
     spacing = 2.0 / (logits.shape[0] - 1)

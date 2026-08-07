@@ -31,6 +31,7 @@ except ImportError:  # not installed / no build metadata available
 from .base import CODVAEBase
 from .checkpoint import Params, load_npz, load_torch_release, save_npz
 from .config import CODVAEConfig
+from .hub import DEFAULT_WEIGHTS_FILENAME, download_pretrained
 from .init import init_params
 from .mesh import (
     CubeTransform,
@@ -155,8 +156,6 @@ class CODVAE:
         elif path.is_dir():
             config, params = load_torch_release(path)
         else:
-            from .hub import DEFAULT_WEIGHTS_FILENAME, download_pretrained
-
             config, params = download_pretrained(
                 str(model_name_or_path),
                 filename=filename or DEFAULT_WEIGHTS_FILENAME,

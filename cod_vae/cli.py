@@ -23,6 +23,17 @@ import argparse
 import sys
 from pathlib import Path
 
+from .checkpoint import load_npz, load_torch_release, save_npz
+from .config import CODVAEConfig
+from .hub import push_to_hub
+from .training import MeshOccupancyDataset, ShapeNetVecSetDataset, TrainingConfig
+from .training.preprocess import (
+    MESH_SUFFIXES,
+    POINT_DIR,
+    SdfGenSettings,
+    build_vecset_dataset,
+)
+
 
 def convert_main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
@@ -38,14 +49,10 @@ def convert_main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    from .checkpoint import load_torch_release, save_npz
-
     config, params = load_torch_release(args.weights_dir)
     save_npz(args.output, config, params)
     print(f"Wrote {args.output} ({len(params)} arrays)")
     if args.push_to_hub:
-        from .hub import push_to_hub
-
         url = push_to_hub(args.push_to_hub, config, params)
         print(f"Pushed to {url}")
 
@@ -95,11 +102,6 @@ def train_main(argv: list[str] | None = None) -> None:
         "--num-workers", type=int, default=0, help="dataloader workers (torch backend)"
     )
     args = parser.parse_args(argv)
-
-    from .checkpoint import load_npz
-    from .config import CODVAEConfig
-    from .training import MeshOccupancyDataset, ShapeNetVecSetDataset, TrainingConfig
-    from .training.preprocess import MESH_SUFFIXES, POINT_DIR
 
     if (args.data_dir / POINT_DIR).is_dir():
         dataset = ShapeNetVecSetDataset(
@@ -287,8 +289,6 @@ def dataset_main(argv: list[str] | None = None) -> None:
         "the surface onto an octree (and on some inputs never finishes)",
     )
     args = parser.parse_args(argv)
-
-    from .training.preprocess import SdfGenSettings, build_vecset_dataset
 
     if not args.meshes and not args.vecset and not args.hf:
         parser.error("at least one source (--meshes, --vecset, or --hf) is required")

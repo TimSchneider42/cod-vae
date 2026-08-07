@@ -5,6 +5,8 @@ preprocessing must produce geometrically consistent occupancy pools, and merged 
 ShapeNetVecSetDataset.
 """
 
+import dataclasses
+
 import numpy as np
 import pytest
 import trimesh
@@ -12,10 +14,15 @@ import trimesh
 pytest.importorskip("point_cloud_utils")
 datasets = pytest.importorskip("datasets")
 
+from cod_vae.cli import dataset_main
 from cod_vae.training import ShapeNetVecSetDataset
+from cod_vae.training import preprocess as pp
 from cod_vae.training.preprocess import (
     SdfGenSettings,
+    _subsample,
+    add_mesh_dir_source,
     build_vecset_dataset,
+    merge_vecset_root,
     preprocess_mesh,
 )
 
@@ -63,8 +70,6 @@ def test_preprocess_mesh_geometry():
 
 
 def test_preprocess_mesh_skip_watertighting():
-    import dataclasses
-
     sphere = trimesh.creation.icosphere(subdivisions=3, radius=2.0)
     settings = dataclasses.replace(TINY, watertight_resolution=None)
     data = preprocess_mesh(sphere.vertices, sphere.faces, settings, seed=0)
@@ -181,9 +186,6 @@ def test_build_and_load_merged_dataset(tmp_path, hf_dataset_dir, vecset_source_d
 
 
 def test_mesh_dir_source(tmp_path):
-    from cod_vae.cli import dataset_main
-    from cod_vae.training.preprocess import add_mesh_dir_source
-
     # A directory with train/val subdirectories and one non-watertight mesh (an open
     # box), which the sdf_gen preprocessing must repair via watertighting.
     mesh_dir = tmp_path / "meshes"
@@ -242,8 +244,6 @@ def test_mesh_dir_source(tmp_path):
 
 
 def test_failures_abort_by_default(tmp_path, monkeypatch):
-    from cod_vae.training import preprocess as pp
-
     mesh_dir = tmp_path / "meshes"
     mesh_dir.mkdir()
     trimesh.creation.box(extents=[1.0, 0.6, 0.4]).export(mesh_dir / "box.stl")
@@ -273,8 +273,6 @@ def test_failures_abort_by_default(tmp_path, monkeypatch):
 
 
 def test_vecset_root_missing_surface_fails(tmp_path):
-    from cod_vae.training.preprocess import merge_vecset_root
-
     root = tmp_path / "root"
     (root / "ShapeNetV2_point" / "cat").mkdir(parents=True)
     (root / "ShapeNetV2_surface").mkdir()
@@ -283,9 +281,6 @@ def test_vecset_root_missing_surface_fails(tmp_path):
 
 
 def test_subsampling(tmp_path, hf_dataset_dir, vecset_source_dir):
-    from cod_vae.cli import dataset_main
-    from cod_vae.training.preprocess import _subsample
-
     # Deterministic given (seed, key), independent of list processing order.
     items = list(range(100))
     assert _subsample(items, 0.1, seed=0, key="a") == _subsample(
@@ -361,8 +356,6 @@ def test_subsampling(tmp_path, hf_dataset_dir, vecset_source_dir):
 
 
 def test_dataset_cli_with_split_map_and_workers(tmp_path, hf_dataset_dir):
-    from cod_vae.cli import dataset_main
-
     out = tmp_path / "merged"
     dataset_main(
         [

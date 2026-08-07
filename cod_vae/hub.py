@@ -7,6 +7,7 @@ huggingface_hub package (``pip install cod-vae[hub]``).
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from .checkpoint import Params, load_npz, save_npz
@@ -52,8 +53,6 @@ def push_to_hub(
     exist). Returns the repository URL. ``card`` is uploaded as the repository's
     README.md, i.e. the model card shown on the Hub.
     """
-    import tempfile
-
     hf = _hf_hub()
     api = hf.HfApi()
     repo_url = api.create_repo(repo_id, private=private, exist_ok=True)
