@@ -13,9 +13,12 @@ pruning -> triplane features -> occupancy logits (positive inside) at query poin
 
 from __future__ import annotations
 
+import contextlib
+
 import numpy as np
 import torch
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn import functional as F
 
 import trimesh
@@ -335,22 +338,36 @@ class CODVAEModule(nn.Module):
         """Posterior moments (B, L, 2 * latent_dim): mean and log-variance."""
         return self.latent_proj_in(z_embed.to(self.latent_proj_in[1].weight.dtype))
 
+    def _attention_ctx(self):
+        """
+        Select the SDPA backend nn.MultiheadAttention dispatches to. "cudnn" pins cuDNN's
+        fused kernel, which never materializes the (tokens x tokens) score matrix and so
+        cuts the backward pass's peak memory; it raises rather than falling back if the
+        shape is unsupported. "default" leaves torch's own backend selection alone.
+        """
+        if self.config.attention_implementation == "cudnn":
+            return sdpa_kernel([SDPBackend.CUDNN_ATTENTION])
+        return contextlib.nullcontext()
+
     def encode(self, pc: torch.Tensor) -> torch.Tensor:
         """Encode point clouds into posterior-mean latents (B, L, latent_dim)."""
-        moments = self.encode_moments(self.encode_embed(pc))
+        with self._attention_ctx():
+            moments = self.encode_moments(self.encode_embed(pc))
         return moments[..., : self.config.latent_dim]
 
     ## -- decoding --------------------------------------------------------------------
 
     def decode_latents(self, latent: torch.Tensor) -> torch.Tensor:
         """Map latents (B, L, latent_dim) back to embeddings (B, L, embed_dim)."""
-        return self.latent_decoder(self.latent_proj_out(latent))
+        with self._attention_ctx():
+            return self.latent_decoder(self.latent_proj_out(latent))
 
     def decode_embed(
         self, z: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Decode latent embeddings into (planes, init_planes, uncertainty_planes)."""
-        return self.autoencoder.decoder(z)
+        with self._attention_ctx():
+            return self.autoencoder.decoder(z)
 
     def decode_planes(self, latent: torch.Tensor) -> torch.Tensor:
         """Decode latents (B, L, latent_dim) into triplanes (B, 3, C, R, R)."""

@@ -34,7 +34,7 @@ import trimesh
 
 from ..base import CODVAEBase
 from ..checkpoint import Params
-from ..config import CODVAEConfig
+from ..config import AttentionImplementation, CODVAEConfig
 from ..mesh import (
     CubeTransform,
     occupancy_grid_to_mesh,
@@ -107,9 +107,22 @@ def _geglu(x: jnp.ndarray) -> jnp.ndarray:
 
 
 def _attention(
-    params, name: str, num_heads: int, query: jnp.ndarray, source: jnp.ndarray
+    params,
+    name: str,
+    num_heads: int,
+    query: jnp.ndarray,
+    source: jnp.ndarray,
+    attn_impl: AttentionImplementation = "default",
 ) -> jnp.ndarray:
-    """torch.nn.MultiheadAttention (batch_first, packed QKV projection)."""
+    """
+    torch.nn.MultiheadAttention (batch_first, packed QKV projection).
+
+    With attn_impl="cudnn" the scores are computed by cuDNN's fused kernel, which never
+    materializes the (tokens x tokens) score matrix -- the dominant term in the backward
+    pass of long sequences. Numerically it differs only by floating-point reassociation.
+    It requires an even sequence length and a cuDNN able to build a plan for the shape,
+    and raises rather than falling back if either does not hold.
+    """
     weight = params[f"{name}.in_proj_weight"]
     bias = params[f"{name}.in_proj_bias"]
     embed_dim = query.shape[-1]
@@ -118,12 +131,19 @@ def _attention(
     v = source @ weight[2 * embed_dim :].T + bias[2 * embed_dim :]
 
     def split_heads(x: jnp.ndarray) -> jnp.ndarray:
-        return x.reshape(*x.shape[:2], num_heads, -1).transpose(0, 2, 1, 3)
+        # (B, N, H, D); the manual path transposes to (B, H, N, D) below, the fused one
+        # takes this layout directly.
+        return x.reshape(*x.shape[:2], num_heads, -1)
 
     q, k, v = split_heads(q), split_heads(k), split_heads(v)
-    scores = q @ k.transpose(0, 1, 3, 2) / math.sqrt(q.shape[-1])
-    out = jax.nn.softmax(scores, axis=-1) @ v
-    out = out.transpose(0, 2, 1, 3).reshape(*query.shape[:2], embed_dim)
+    if attn_impl == "cudnn":
+        # Default scale is 1/sqrt(head_dim), matching the manual path.
+        out = jax.nn.dot_product_attention(q, k, v, implementation="cudnn")
+    else:
+        q, k, v = (x.transpose(0, 2, 1, 3) for x in (q, k, v))
+        scores = q @ k.transpose(0, 1, 3, 2) / math.sqrt(q.shape[-1])
+        out = (jax.nn.softmax(scores, axis=-1) @ v).transpose(0, 2, 1, 3)
+    out = out.reshape(*query.shape[:2], embed_dim)
     return _linear(params, f"{name}.out_proj", out)
 
 
@@ -132,11 +152,16 @@ def _ffn_geglu(params, name: str, x: jnp.ndarray) -> jnp.ndarray:
 
 
 def _self_attn_block(
-    params, name: str, num_heads: int, x: jnp.ndarray, dp: DropPath | None = None
+    params,
+    name: str,
+    num_heads: int,
+    x: jnp.ndarray,
+    dp: DropPath | None = None,
+    attn_impl: AttentionImplementation = "default",
 ) -> jnp.ndarray:
     """Pre-LN self-attention followed by a GEGLU FFN, both residual with DropPath."""
     h = _layer_norm(params, f"{name}.ln_1", x)
-    x = x + _drop(dp, _attention(params, f"{name}.attn", num_heads, h, h))
+    x = x + _drop(dp, _attention(params, f"{name}.attn", num_heads, h, h, attn_impl))
     h = _ffn_geglu(params, f"{name}.mlp", _layer_norm(params, f"{name}.ln_2", x))
     return x + _drop(dp, h)
 
@@ -148,6 +173,7 @@ def _cross_attn_block(
     x: jnp.ndarray,
     source: jnp.ndarray,
     dp: DropPath | None = None,
+    attn_impl: AttentionImplementation = "default",
 ) -> jnp.ndarray:
     """Residual cross-attention, self-attention, and GEGLU FFN with DropPath."""
     h = _attention(
@@ -156,16 +182,24 @@ def _cross_attn_block(
         num_heads,
         _layer_norm(params, f"{name}.ln_cross", x),
         _layer_norm(params, f"{name}.ln_source", source),
+        attn_impl,
     )
     x = x + _drop(dp, h)
     h = _layer_norm(params, f"{name}.ln_1", x)
-    x = x + _drop(dp, _attention(params, f"{name}.self_attn", num_heads, h, h))
+    x = x + _drop(
+        dp, _attention(params, f"{name}.self_attn", num_heads, h, h, attn_impl)
+    )
     h = _ffn_geglu(params, f"{name}.mlp", _layer_norm(params, f"{name}.ln_2", x))
     return x + _drop(dp, h)
 
 
 def _cross_attn(
-    params, name: str, num_heads: int, x: jnp.ndarray, source: jnp.ndarray
+    params,
+    name: str,
+    num_heads: int,
+    x: jnp.ndarray,
+    source: jnp.ndarray,
+    attn_impl: AttentionImplementation = "default",
 ) -> jnp.ndarray:
     """Normalized cross-attention without residual or output head (no DropPath)."""
     return _attention(
@@ -174,6 +208,7 @@ def _cross_attn(
         num_heads,
         _layer_norm(params, f"{name}.ln_cross", x),
         _layer_norm(params, f"{name}.ln_source", source),
+        attn_impl,
     )
 
 
@@ -240,7 +275,12 @@ def encode_embed(
     for block in range(config.encoder_num_blocks):
         name = f"autoencoder.encoder.blocks.{block}"
         patches = patches + _cross_attn(
-            params, f"{name}.points2patch", num_heads, patches, point_features
+            params,
+            f"{name}.points2patch",
+            num_heads,
+            patches,
+            point_features,
+            attn_impl=config.attention_implementation,
         )
         # The reference applies ln_ffn and the FFN's own LayerNorm back to back.
         h = _layer_norm(params, f"{name}.ln_ffn", patches)
@@ -250,17 +290,39 @@ def encode_embed(
         patches = patches + _drop(dp, h)
         for layer in range(config.encoder_num_layers_per_block):
             patches = _self_attn_block(
-                params, f"{name}.processing_layers.{layer}", num_heads, patches, dp
+                params,
+                f"{name}.processing_layers.{layer}",
+                num_heads,
+                patches,
+                dp,
+                attn_impl=config.attention_implementation,
             )
         z = _cross_attn_block(
-            params, f"{name}.patch2latents", num_heads, z, patches, dp
+            params,
+            f"{name}.patch2latents",
+            num_heads,
+            z,
+            patches,
+            dp,
+            attn_impl=config.attention_implementation,
         )
         point_features = point_features + _cross_attn(
-            params, f"{name}.latents2points", num_heads, point_features, z
+            params,
+            f"{name}.latents2points",
+            num_heads,
+            point_features,
+            z,
+            attn_impl=config.attention_implementation,
         )
 
     return _cross_attn_block(
-        params, "autoencoder.encoder.last_block", num_heads, z, point_features, dp
+        params,
+        "autoencoder.encoder.last_block",
+        num_heads,
+        z,
+        point_features,
+        dp,
+        attn_impl=config.attention_implementation,
     )
 
 
@@ -293,7 +355,12 @@ def decode_latents(
     z = _layer_norm(params, "latent_proj_out.1", z)
     for layer in range(config.num_latent_layers):
         z = _self_attn_block(
-            params, f"latent_decoder.transformer.{layer}", config.num_heads, z, dp
+            params,
+            f"latent_decoder.transformer.{layer}",
+            config.num_heads,
+            z,
+            dp,
+            attn_impl=config.attention_implementation,
         )
     z = _layer_norm(params, "latent_decoder.linear_out.0", z)
     return _linear(params, "latent_decoder.linear_out.1", z)
@@ -327,6 +394,7 @@ def _decode_init_tokens(
             x,
             source,
             dp,
+            attn_impl=config.attention_implementation,
         )
     init_tokens = x[:, : config.num_output_patches]
 
@@ -387,6 +455,7 @@ def decode_embed(
         num_heads,
         merge_tokens,
         pruned,
+        attn_impl=config.attention_implementation,
     )
 
     ## refine the kept tokens (with merged pruned tokens and latents as context)
@@ -411,6 +480,7 @@ def decode_embed(
             num_heads,
             x,
             dp,
+            attn_impl=config.attention_implementation,
         )
     refined = x[:, :num_keep]
     full_tokens = init_tokens.at[jnp.arange(batch_size)[:, None], keep_indices].set(
