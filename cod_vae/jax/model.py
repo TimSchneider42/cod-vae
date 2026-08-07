@@ -753,18 +753,23 @@ def _resolve_attention(
     #     *Bs, T, N, _ = query.shape ; B = math.prod(Bs)
     #     grad_output = jnp.reshape(grad_output, (B,) + query.shape[-3:])
     # That is only valid when query and grad_output carry the same mapped axes. When the
-    # decoder is differentiated under a critic ensemble, the ensemble maps the downstream
-    # parameters while the query tokens stay shared, so the cotangent gains an axis the
-    # query never had and the reshape fails. Probe that shape exactly -- mapped weights,
-    # shared q/k/v -- rather than assume the kernel is usable because it compiles forward.
+    # decoder is differentiated under a critic ensemble, the ensemble maps the projection
+    # weights, so the cotangent gains an axis; whether the QUERY gains it too decides
+    # whether the reshape is consistent.
+    #
+    # The mapped weight must therefore FLOW INTO the operands, exactly as it does in the
+    # real decoder where q/k/v come out of the mapped in_proj. A probe that maps a weight
+    # used only downstream of the attention leaves q/k/v unmapped, no asymmetry reaches the
+    # batcher, and cuDNN compiles happily -- the probe then certifies a kernel that dies in
+    # training. Hence `q * w` here rather than a bare `out @ w`.
     def _probe_loss(w, q, k, v):
-        out = jax.nn.dot_product_attention(q, k, v, implementation="cudnn")
-        return jnp.sum((out @ w).astype(jnp.float32))
+        out = jax.nn.dot_product_attention(q * w, k, v, implementation="cudnn")
+        return jnp.sum(out.astype(jnp.float32))
 
     try:
         jax.jit(
             jax.vmap(jax.grad(_probe_loss, argnums=0), in_axes=(0, None, None, None))
-        ).lower(jax.ShapeDtypeStruct((2, 8, 8), dtype), probe, probe, probe).compile()
+        ).lower(jax.ShapeDtypeStruct((2,), dtype), probe, probe, probe).compile()
     except Exception as e:
         logger.info(
             "Attention: using the default kernel (cuDNN's fused kernel is unusable "

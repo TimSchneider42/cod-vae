@@ -17,6 +17,9 @@ rng = np.random.default_rng(0)
 q, k, v = (jnp.asarray(rng.normal(size=(B, T, N, H)) * 0.1, DTYPE) for _ in range(3))
 w = jnp.asarray(rng.normal(size=(E, H, H)) * 0.1, DTYPE)
 w1 = jnp.asarray(rng.normal(size=(H, H)) * 0.1, DTYPE)
+ws = jnp.asarray(
+    rng.normal(size=(E,)) * 0.1 + 1.0, DTYPE
+)  # per-member scalar feeding q
 
 
 def report(label, fn):
@@ -39,9 +42,22 @@ for impl in ("xla", "cudnn"):
 
     # impl is closed over, not passed: a string argument to a jitted function would be
     # rejected as non-static and every case would "fail" for the wrong reason.
-    def loss(w_i, q, k, v, _impl=impl):
+    #
+    # Two losses that differ ONLY in whether the mapped weight reaches the attention
+    # operands. This is the whole trap: `loss_downstream` maps a weight used after the
+    # attention, so q/k/v stay unmapped, no axis asymmetry reaches the batcher, and cuDNN
+    # compiles -- certifying a kernel that then dies in training. `loss_derived` feeds the
+    # mapped weight into q, which is what the real decoder does (q comes out of the
+    # ensemble-mapped in_proj), and that is the case that actually fails.
+    def loss_downstream(w_i, q, k, v, _impl=impl):
         out = jax.nn.dot_product_attention(q, k, v, implementation=_impl)
         return jnp.sum((out @ w_i).astype(jnp.float32))
+
+    def loss_derived(w_i, q, k, v, _impl=impl):
+        out = jax.nn.dot_product_attention(q * w_i, k, v, implementation=_impl)
+        return jnp.sum(out.astype(jnp.float32))
+
+    loss = loss_downstream
 
     report(
         "forward only",
@@ -60,11 +76,20 @@ for impl in ("xla", "cudnn"):
     )
 
     report(
-        "vmap(grad), params mapped / qkv shared  <-- the training shape",
-        lambda loss=loss: jax.jit(
+        "vmap(grad), mapped weight used DOWNSTREAM only (q/k/v unmapped)",
+        lambda loss=loss_downstream: jax.jit(
             jax.vmap(jax.grad(loss, argnums=0), in_axes=(0, None, None, None))
         )
         .lower(w, q, k, v)
+        .compile(),
+    )
+
+    report(
+        "vmap(grad), mapped weight DERIVES q  <-- the training shape",
+        lambda loss=loss_derived: jax.jit(
+            jax.vmap(jax.grad(loss, argnums=0), in_axes=(0, None, None, None))
+        )
+        .lower(ws, q, k, v)
         .compile(),
     )
 
