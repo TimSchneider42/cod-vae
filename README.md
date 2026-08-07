@@ -97,9 +97,32 @@ vae = CODVAE.from_pretrained("TimSchneider42/cod-vae-32x32")   # 32 x 32 = 1024 
 
 Rows are `num_latents`, columns are `latent_dim`; a shape is compressed into `num_latents` x `latent_dim` numbers, so the grid spans 16 (4x4) to 2048 (64x32) numbers per shape. `32x32` and `64x32` correspond to the released `vae_m32` and `vae_m64` configurations.
 The largest model is additionally published under the short name [`TimSchneider42/cod-vae`](https://huggingface.co/TimSchneider42/cod-vae), which is what the examples above load; it is a copy of `cod-vae-64x32`, not a link to it, since the Hub has no aliasing between repositories.
-The grid is still training — a repository appears once its run finishes, and each model card states the exact state of the checkpoint it holds.
 Unlike the original models, they were not trained on ShapeNet alone, but on 110,077 shapes: the 48,597 ShapeNet training shapes plus 50,000 CAD meshes from ABC and all 11,480 MNIST3D meshes, both from [Tactile MNIST](https://github.com/TimSchneider42/tactile-mnist).
-Otherwise the recipe is the paper's — see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-models-were-trained) for the exact commands, and each model card for the model's held-out reconstruction quality.
+Otherwise the recipe is the paper's — see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-models-were-trained) for the exact commands.
+
+#### Reconstruction quality on ABC
+
+Measured on the ABC test split, which no model saw during training, from the checkpoint each repository holds:
+
+| **#latents** \ **latent-dim** | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|
+| **4** | 0.671 / 0.712 | 0.743 / 0.758 | 0.804 / 0.797 | 0.852 / 0.829 |
+| **8** | 0.727 / 0.748 | 0.806 / 0.793 | 0.854 / 0.829 | 0.887 / 0.851 |
+| **16** | 0.782 / 0.770 | 0.873 / 0.835 | 0.903 / 0.863 | 0.916 / 0.875 |
+| **32** | 0.831 / 0.808 | 0.900 / 0.858 | 0.919 / 0.877 | 0.925 / 0.886 |
+| **64** | 0.856 / 0.826 | 0.915 / 0.874 | 0.927 / 0.887 | 0.932 / 0.893 |
+
+Each cell is **volume IoU / near-surface accuracy**, averaged over 128 held-out meshes.
+Both are computed on the decoded occupancy field rather than on a meshed reconstruction, against the query points of the original recipe: IoU over points drawn uniformly from the cube, and accuracy over points drawn near the surface.
+The near-surface number is the harder of the two and the one that tracks fine detail, since points far from the surface are easy to classify and dominate the uniform sample.
+
+Quality rises monotonically along both axes, but the two axes are not interchangeable: at a fixed budget of numbers per shape, a balanced split beats a lopsided one.
+Of the four ways to spend 256 numbers, `16x16` is best at 0.903 and `64x4` is worst at 0.856, with `32x8` (0.900) and `8x32` (0.887) in between; the same ordering holds at 128 numbers, where `16x8` reaches 0.873 and `32x4` only 0.831.
+A `latent_dim` of 4 is the weakest use of any budget, and the optimum sits around 8 to 16 with the remaining capacity spent on latents.
+Returns also flatten toward the top-right corner: at `num_latents=64` the last doubling of latent width buys 0.005 IoU, against 0.059 for the first.
+
+ABC is the harder of the two evaluation sources at every size but the smallest, where the ordering reverses (`4x4` scores 0.671 on ABC against 0.630 on MNIST3D) — with 16 numbers per shape the reconstruction is too coarse for the digit geometry to survive at all.
+The corresponding MNIST3D figures are on each model card.
 
 ## Training
 
