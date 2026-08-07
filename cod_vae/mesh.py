@@ -6,6 +6,8 @@ sampling surface point clouds, and turning decoded occupancy grids back into mes
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from typing import Any
 
 import numpy as np
 import trimesh
@@ -20,6 +22,7 @@ __all__ = [
     "sample_surface_points",
     "grid_queries",
     "occupancy_grid_to_mesh",
+    "occupancy_grid_to_mesh_warp",
 ]
 
 
@@ -138,11 +141,93 @@ def occupancy_grid_to_mesh(
     """
     if logits.min() >= 0 or logits.max() <= 0:
         return trimesh.Trimesh()
+    if _warp_cuda_available():
+        return occupancy_grid_to_mesh_warp(logits, transform)
+    return _occupancy_grid_to_mesh_skimage(logits, transform)
+
+
+def _occupancy_grid_to_mesh_skimage(
+    logits: np.ndarray, transform: CubeTransform | None = None
+) -> trimesh.Trimesh:
+    """CPU marching cubes. Reference implementation and the fallback used wherever Warp
+    or a CUDA device is unavailable."""
     spacing = 2.0 / (logits.shape[0] - 1)
     vertices, faces, _, _ = measure.marching_cubes(
         logits, level=0.0, spacing=(spacing,) * 3, gradient_direction="ascent"
     )
     mesh = trimesh.Trimesh(vertices - 1.0, faces)
+    if transform is not None:
+        mesh = transform.apply_inverse_mesh(mesh)
+    return mesh
+
+
+@lru_cache(maxsize=1)
+def _warp_cuda_available() -> bool:
+    """Whether Warp is importable and a CUDA device is present. Cached: the answer
+    cannot change within a process, and the import alone is not cheap."""
+    try:
+        import warp as wp
+
+        wp.init()
+        return wp.get_cuda_device_count() > 0
+    except Exception:
+        return False
+
+
+def _to_warp_field(logits: Any) -> Any:
+    """Wrap a dense occupancy grid as a Warp CUDA array. Device arrays exposing
+    ``__dlpack__`` (jax, torch) are adopted without a copy; host arrays are uploaded."""
+    import warp as wp
+
+    if isinstance(logits, wp.array):
+        field = logits
+    elif isinstance(logits, np.ndarray):
+        field = wp.array(
+            np.ascontiguousarray(logits, dtype=np.float32),
+            dtype=wp.float32,
+            device="cuda",
+        )
+    else:
+        field = wp.from_dlpack(logits)
+    if field.dtype != wp.float32:
+        raise ValueError(
+            f"Warp marching cubes requires a float32 grid, got {field.dtype}. Cast the "
+            f"grid before calling (half-precision models decode in their compute dtype)."
+        )
+    if field.ndim != 3:
+        raise ValueError(f"Expected a 3D (R, R, R) grid, got shape {field.shape}.")
+    return field
+
+
+def occupancy_grid_to_mesh_warp(
+    logits: Any, transform: CubeTransform | None = None
+) -> trimesh.Trimesh:
+    """
+    GPU counterpart of :func:`occupancy_grid_to_mesh`, using NVIDIA Warp's marching
+    cubes. ``logits`` is a dense (R, R, R) occupancy logit grid, either a host array or
+    any CUDA array implementing ``__dlpack__`` (a jax or torch device array), the latter
+    being consumed in place without a host round trip. Requires a CUDA device.
+    """
+    import warp as wp
+
+    field = _to_warp_field(logits)
+    resolution = field.shape[0]
+    # max_verts/max_tris/device are deprecated in warp 1.16 and removed in 1.19; the
+    # output arrays size themselves.
+    mc = wp.MarchingCubes(nx=resolution, ny=resolution, nz=resolution)
+    mc.surface(field, 0.0)
+    vertices = mc.verts.numpy()
+    if len(vertices) == 0:
+        return trimesh.Trimesh()
+    # Warp winds triangles opposite to skimage's gradient_direction="ascent", which
+    # would leave the surface inside-out (negated signed volume, backfaces toward the
+    # camera). The vertices themselves agree exactly, so reversing each triangle is all
+    # that is needed.
+    faces = mc.indices.numpy().reshape(-1, 3)[:, ::-1]
+    # Warp emits vertices in voxel index space; skimage applies the same scaling
+    # internally via its `spacing` argument, so both land in [-1, 1].
+    spacing = 2.0 / (resolution - 1)
+    mesh = trimesh.Trimesh(vertices * spacing - 1.0, faces)
     if transform is not None:
         mesh = transform.apply_inverse_mesh(mesh)
     return mesh

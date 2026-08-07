@@ -18,9 +18,16 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+import trimesh
+
 from ..base import CODVAEBase
 from ..checkpoint import Params
 from ..config import CODVAEConfig
+from ..mesh import (
+    CubeTransform,
+    occupancy_grid_to_mesh,
+    occupancy_grid_to_mesh_warp,
+)
 from .modules import (
     CrossAttention,
     CrossAttnBlock,
@@ -510,6 +517,7 @@ class CODVAETorch(CODVAEBase):
             else (dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype))
         )
         self.module = CODVAEModule(config).to(self.device, self.dtype).eval()
+        self._grid_queries_cache: dict[int, torch.Tensor] = {}
         super().__init__(config, params)
 
     def _load_params(self, params: Params) -> None:
@@ -532,21 +540,64 @@ class CODVAETorch(CODVAEBase):
             self.device, self.dtype if dtype is None else dtype
         )
 
+    def occupancy_grid_to_mesh(
+        self, logits: torch.Tensor, transform: CubeTransform | None = None
+    ) -> trimesh.Trimesh:
+        """
+        Turn a dense occupancy logit grid that is still on the device -- as returned by
+        :meth:`_decode_grid_native` -- into a mesh, without a host round trip: Warp
+        adopts the torch buffer via DLPack and marching cubes runs where the data
+        already is. Falls back to the host implementation off CUDA.
+        """
+        if self.device.type != "cuda":
+            return occupancy_grid_to_mesh(self._to_numpy(logits), transform)
+        return occupancy_grid_to_mesh_warp(logits.float().contiguous(), transform)
+
+    def _to_numpy(self, array) -> np.ndarray:
+        return array.float().cpu().numpy()
+
+    def _grid_queries(self, resolution: int) -> torch.Tensor:
+        """Dense [-1, 1]^3 grid of shape (resolution ** 3, 3), built and cached on the
+        model's device. Same layout as :func:`cod_vae.mesh.grid_queries`, which builds
+        the identical grid on the host."""
+        cached = self._grid_queries_cache.get(resolution)
+        if cached is None:
+            axis = torch.linspace(
+                -1.0, 1.0, resolution, dtype=torch.float32, device=self.device
+            )
+            grid = torch.stack(torch.meshgrid(axis, axis, axis, indexing="ij"), dim=-1)
+            cached = grid.reshape(-1, 3)
+            self._grid_queries_cache[resolution] = cached
+        return cached
+
     @torch.no_grad()
-    def _encode(self, points):
-        return self.module.encode(self._to_device(points)).float().cpu().numpy()
+    def _decode_grid_native(self, latents, resolution: int, chunk_size: int):
+        # The grid is generated on the device and cached, so nothing is uploaded per
+        # call: it is the same array every time and is by far the largest transfer in
+        # this path (3 * resolution ** 3 floats, against resolution ** 3 coming back).
+        planes = self._decode_planes(latents)
+        queries = self._grid_queries(resolution)
+        batch = latents.shape[0]
+        chunks = [
+            self.module.decode_logits(
+                planes, queries[i : i + chunk_size].expand(batch, -1, -1)
+            )
+            for i in range(0, queries.shape[0], chunk_size)
+        ]
+        return torch.cat(chunks, dim=1)
+
+    @torch.no_grad()
+    def _encode_native(self, points):
+        return self.module.encode(self._to_device(points))
 
     @torch.no_grad()
     def _decode_planes(self, latents):
         return self.module.decode_planes(self._to_device(latents))
 
     @torch.no_grad()
-    def _decode_logits(self, planes, queries):
-        return (
-            self.module.decode_logits(planes, self._to_device(queries, torch.float32))
-            .float()
-            .cpu()
-            .numpy()
+    def _decode_logits_native(self, planes, queries):
+        return self.module.decode_logits(
+            planes, self._to_device(queries, torch.float32)
         )
 
     @torch.no_grad()
@@ -557,17 +608,12 @@ class CODVAETorch(CODVAEBase):
         return self.module.decode_planes(latent), center, size
 
     @torch.no_grad()
-    def _decode_logits_full(self, handle, queries, object_scale):
+    def _decode_logits_full_native(self, handle, queries, object_scale):
         planes, center, size = handle
-        return (
-            self.module.decode_logits_full(
-                planes,
-                center,
-                size,
-                self._to_device(queries, torch.float32),
-                object_scale,
-            )
-            .float()
-            .cpu()
-            .numpy()
+        return self.module.decode_logits_full(
+            planes,
+            center,
+            size,
+            self._to_device(queries, torch.float32),
+            object_scale,
         )

@@ -30,9 +30,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import trimesh
+
 from ..base import CODVAEBase
 from ..checkpoint import Params
 from ..config import CODVAEConfig
+from ..mesh import (
+    CubeTransform,
+    occupancy_grid_to_mesh,
+    occupancy_grid_to_mesh_warp,
+)
 
 __all__ = [
     "CODVAEJax",
@@ -609,6 +616,7 @@ class CODVAEJax(CODVAEBase):
             device = jax.devices(device)[0]
         self.device = device if device is not None else jax.devices()[0]
         self.dtype = jnp.float32 if dtype is None else jnp.dtype(dtype)
+        self._grid_queries_cache: dict[int, "jnp.ndarray"] = {}
         # Parameters are committed to the device below; jitted computations follow them.
         self._jit_encode = jax.jit(partial(encode, config=config))
         self._jit_decode_planes = jax.jit(partial(decode_planes, config=config))
@@ -648,20 +656,72 @@ class CODVAEJax(CODVAEBase):
             self.device,
         )
 
-    def _encode(self, points):
-        return np.asarray(
-            self._jit_encode(self.params, self._to_device(points)), dtype=np.float32
+    def occupancy_grid_to_mesh(
+        self, logits: "jnp.ndarray", transform: CubeTransform | None = None
+    ) -> trimesh.Trimesh:
+        """
+        Turn a dense occupancy logit grid that is still on the device -- as returned by
+        :meth:`_decode_grid_native` -- into a mesh, without a host round trip: Warp
+        adopts the jax buffer via DLPack and marching cubes runs where the data already
+        is. Falls back to the host implementation off CUDA.
+        """
+        if self.device.platform != "gpu":
+            return occupancy_grid_to_mesh(self._to_numpy(logits), transform)
+        return occupancy_grid_to_mesh_warp(logits.astype(jnp.float32), transform)
+
+    def _to_numpy(self, array) -> np.ndarray:
+        # np.array, not np.asarray: converting a jax array yields a read-only buffer, and
+        # consumers such as skimage's marching cubes require a writable one.
+        return np.array(array, dtype=np.float32)
+
+    def _encode_native(self, points):
+        return self._jit_encode(self.params, self._to_device(points))
+
+    def _grid_queries(self, resolution: int) -> "jnp.ndarray":
+        """Dense [-1, 1]^3 grid of shape (resolution ** 3, 3), built and cached on the
+        model's device. Same layout as :func:`cod_vae.mesh.grid_queries`, which builds
+        the identical grid on the host."""
+        cached = self._grid_queries_cache.get(resolution)
+        if cached is None:
+            axis = jnp.linspace(-1.0, 1.0, resolution, dtype=jnp.float32)
+            grid = jnp.stack(jnp.meshgrid(axis, axis, axis, indexing="ij"), axis=-1)
+            cached = jax.device_put(grid.reshape(-1, 3), self.device)
+            self._grid_queries_cache[resolution] = cached
+        return cached
+
+    def _decode_grid_native(self, latents, resolution: int, chunk_size: int):
+        # The grid is generated on the device and cached, so nothing is uploaded per
+        # call: it is the same array every time and is by far the largest transfer in
+        # this path (3 * resolution ** 3 floats, against resolution ** 3 coming back).
+        # Chunks keep the fixed shape the jitted decoder was compiled for.
+        planes = self._decode_planes(latents)
+        queries = self._grid_queries(resolution)
+        num_queries = queries.shape[0]
+        padded = max(1, -(-num_queries // chunk_size)) * chunk_size
+        if padded != num_queries:
+            queries = jnp.pad(queries, ((0, padded - num_queries), (0, 0)))
+        batch = latents.shape[0]
+        logits = jnp.concatenate(
+            [
+                self._jit_decode_logits(
+                    self.params,
+                    planes,
+                    jnp.broadcast_to(
+                        queries[i : i + chunk_size][None], (batch, chunk_size, 3)
+                    ),
+                )
+                for i in range(0, padded, chunk_size)
+            ],
+            axis=1,
         )
+        return logits[:, :num_queries]
 
     def _decode_planes(self, latents):
         return self._jit_decode_planes(self.params, self._to_device(latents))
 
-    def _decode_logits(self, planes, queries):
-        return np.asarray(
-            self._jit_decode_logits(
-                self.params, planes, self._to_device(queries, jnp.float32)
-            ),
-            dtype=np.float32,
+    def _decode_logits_native(self, planes, queries):
+        return self._jit_decode_logits(
+            self.params, planes, self._to_device(queries, jnp.float32)
         )
 
     def _decode_planes_full(self, full_latents):
@@ -674,16 +734,13 @@ class CODVAEJax(CODVAEBase):
         size = self._to_device(full_latents[:, dims + 3])
         return planes, center, size
 
-    def _decode_logits_full(self, handle, queries, object_scale):
+    def _decode_logits_full_native(self, handle, queries, object_scale):
         planes, center, size = handle
-        return np.asarray(
-            self._jit_decode_logits_full(
-                self.params,
-                planes,
-                center,
-                size,
-                object_scale,
-                self._to_device(queries, jnp.float32),
-            ),
-            dtype=np.float32,
+        return self._jit_decode_logits_full(
+            self.params,
+            planes,
+            center,
+            size,
+            object_scale,
+            self._to_device(queries, jnp.float32),
         )

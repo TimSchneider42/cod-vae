@@ -60,8 +60,19 @@ class CODVAEBase(ABC):
     def get_params(self) -> Params:
         """Return the current parameters as a flat numpy dict."""
 
+    ## -- backend-native interface ----------------------------------------------------
+    #
+    # These return the backend's own arrays, still on its device. The ``_*`` methods
+    # below them are shallow wrappers that convert via :meth:`_to_numpy`, so callers
+    # that go on to feed another GPU library (Warp's marching cubes, say) can take the
+    # native buffer and skip the host round trip entirely.
+
     @abstractmethod
-    def _encode(self, points: np.ndarray) -> np.ndarray:
+    def _to_numpy(self, array: Any) -> np.ndarray:
+        """Convert a backend-native array to a writable float32 numpy array."""
+
+    @abstractmethod
+    def _encode_native(self, points: np.ndarray) -> Any:
         """Encode point clouds (B, N, 3) into posterior-mean latents (B, L, D)."""
 
     @abstractmethod
@@ -69,7 +80,7 @@ class CODVAEBase(ABC):
         """Decode latents (B, L, D) into a backend-native triplane handle."""
 
     @abstractmethod
-    def _decode_logits(self, planes: Any, queries: np.ndarray) -> np.ndarray:
+    def _decode_logits_native(self, planes: Any, queries: np.ndarray) -> Any:
         """Evaluate occupancy logits (B, N) at query points (B, N, 3)."""
 
     @abstractmethod
@@ -77,13 +88,49 @@ class CODVAEBase(ABC):
         """Split full latents (B, F) and decode triplanes into a backend handle."""
 
     @abstractmethod
-    def _decode_logits_full(
+    def _decode_logits_full_native(
         self, handle: Any, queries: np.ndarray, object_scale: float
-    ) -> np.ndarray:
+    ) -> Any:
         """
         Evaluate occupancy logits (B, N) at query points (B, N, 3) in the normalized
         world frame given a handle from :meth:`_decode_planes_full`.
         """
+
+    def _decode_grid_native(
+        self, latents: np.ndarray, resolution: int, chunk_size: int
+    ) -> Any:
+        """
+        Evaluate occupancy logits (B, resolution ** 3) on the dense [-1, 1]^3 grid for
+        batched latents. Backends override this to build the grid on their own device;
+        this default materializes it on the host.
+        """
+        planes = self._decode_planes(latents)
+        return self._decode_logits_chunked(
+            lambda chunk: self._decode_logits(planes, chunk),
+            np.broadcast_to(
+                grid_queries(resolution)[None],
+                (latents.shape[0], resolution**3, 3),
+            ),
+            chunk_size,
+        )
+
+    def _encode(self, points: np.ndarray) -> np.ndarray:
+        return self._to_numpy(self._encode_native(points))
+
+    def _decode_logits(self, planes: Any, queries: np.ndarray) -> np.ndarray:
+        return self._to_numpy(self._decode_logits_native(planes, queries))
+
+    def _decode_logits_full(
+        self, handle: Any, queries: np.ndarray, object_scale: float
+    ) -> np.ndarray:
+        return self._to_numpy(
+            self._decode_logits_full_native(handle, queries, object_scale)
+        )
+
+    def _decode_grid(
+        self, latents: np.ndarray, resolution: int, chunk_size: int
+    ) -> np.ndarray:
+        return self._to_numpy(self._decode_grid_native(latents, resolution, chunk_size))
 
     ## -- public numpy interface ------------------------------------------------------
 
@@ -166,7 +213,9 @@ class CODVAEBase(ABC):
             resolution = self.config.decoder_output_resolution
         latents = np.asarray(latents, dtype=np.float32)
         batched = latents.ndim == 3
-        logits = self.decode(latents, grid_queries(resolution), chunk_size=chunk_size)
+        logits = self._decode_grid(
+            latents if batched else latents[None], resolution, chunk_size
+        )
         shape = (resolution,) * 3
         return logits.reshape((-1, *shape) if batched else shape)
 
@@ -480,12 +529,28 @@ class CODVAEBase(ABC):
         """
         latents = np.asarray(latents, dtype=np.float32)
         batched = latents.ndim == 3
-        grids = self.decode_volume(latents, resolution, chunk_size=chunk_size)
+        if resolution is None:
+            resolution = self.config.decoder_output_resolution
+        # Keep the grid on the backend's device: occupancy_grid_to_mesh runs marching
+        # cubes there, so neither the grid nor the query points cross the bus.
+        grids = self._decode_grid_native(
+            latents if batched else latents[None], resolution, chunk_size
+        ).reshape((-1, *(resolution,) * 3))
         if not batched:
-            return occupancy_grid_to_mesh(grids, transform)
+            return self.occupancy_grid_to_mesh(grids[0], transform)
         if transform is None:
             transform = [None] * len(grids)
-        return [occupancy_grid_to_mesh(g, t) for g, t in zip(grids, transform)]
+        return [self.occupancy_grid_to_mesh(g, t) for g, t in zip(grids, transform)]
+
+    def occupancy_grid_to_mesh(
+        self, logits: Any, transform: CubeTransform | None = None
+    ) -> trimesh.Trimesh:
+        """
+        Turn a backend-native occupancy logit grid into a mesh. Backends override this
+        to run marching cubes on their own device; this default brings the grid to the
+        host first.
+        """
+        return occupancy_grid_to_mesh(self._to_numpy(logits), transform)
 
     ## -- persistence -----------------------------------------------------------------
 
