@@ -16,6 +16,7 @@ dependencies = [
     "numpy",
     "trimesh",
     "scikit-image",
+    "warp-lang",
 ]
 
 [project.urls]

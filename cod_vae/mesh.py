@@ -11,6 +11,7 @@ from typing import Any
 
 import numpy as np
 import trimesh
+import warp as wp
 from skimage import measure
 
 __all__ = [
@@ -163,22 +164,15 @@ def _occupancy_grid_to_mesh_skimage(
 
 @lru_cache(maxsize=1)
 def _warp_cuda_available() -> bool:
-    """Whether Warp is importable and a CUDA device is present. Cached: the answer
-    cannot change within a process, and the import alone is not cheap."""
-    try:
-        import warp as wp
-
-        wp.init()
-        return wp.get_cuda_device_count() > 0
-    except Exception:
-        return False
+    """Whether a CUDA device Warp can use is present. Cached: it cannot change within a
+    process, and ``wp.init()`` is not cheap."""
+    wp.init()
+    return wp.get_cuda_device_count() > 0
 
 
 def _to_warp_field(logits: Any) -> Any:
     """Wrap a dense occupancy grid as a Warp CUDA array. Device arrays exposing
     ``__dlpack__`` (jax, torch) are adopted without a copy; host arrays are uploaded."""
-    import warp as wp
-
     if isinstance(logits, wp.array):
         field = logits
     elif isinstance(logits, np.ndarray):
@@ -208,8 +202,6 @@ def occupancy_grid_to_mesh_warp(
     any CUDA array implementing ``__dlpack__`` (a jax or torch device array), the latter
     being consumed in place without a host round trip. Requires a CUDA device.
     """
-    import warp as wp
-
     field = _to_warp_field(logits)
     resolution = field.shape[0]
     # max_verts/max_tris/device are deprecated in warp 1.16 and removed in 1.19; the
