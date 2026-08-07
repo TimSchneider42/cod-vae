@@ -14,6 +14,8 @@ pruning -> triplane features -> occupancy logits (positive inside) at query poin
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import logging
 
 import numpy as np
 import torch
@@ -41,6 +43,8 @@ from .modules import (
 )
 
 __all__ = ["CODVAETorch", "CODVAEModule", "farthest_point_sampling"]
+
+logger = logging.getLogger(__name__)
 
 
 def _lexsort_indices(points: torch.Tensor) -> torch.Tensor:
@@ -513,6 +517,29 @@ class _LatentDecoder(nn.Module):
         return self.linear_out(z)
 
 
+def _resolve_attention(requested, device, dtype):
+    """
+    Resolve "auto" to "cudnn" where the fused kernel can run, else "default". Needs a
+    CUDA device, a half-precision compute dtype (cuDNN rejects float32), and a cuDNN
+    build that supports the shape -- torch reports the last through
+    can_use_cudnn_attention, so unlike the jax side no trial compile is required.
+    """
+    if requested != "auto":
+        return requested
+    if device.type != "cuda":
+        logger.info("Attention: using the default kernel (no CUDA device).")
+        return "default"
+    if dtype not in (torch.float16, torch.bfloat16):
+        logger.info(
+            "Attention: using the default kernel (cuDNN needs float16/bfloat16, this "
+            "model computes in %s).",
+            str(dtype).replace("torch.", ""),
+        )
+        return "default"
+    logger.info("Attention: using cuDNN's fused kernel.")
+    return "cudnn"
+
+
 class CODVAETorch(CODVAEBase):
     """PyTorch backend of COD-VAE (see :class:`cod_vae.base.CODVAEBase`)."""
 
@@ -532,6 +559,12 @@ class CODVAETorch(CODVAEBase):
             torch.float32
             if dtype is None
             else (dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype))
+        )
+        config = dataclasses.replace(
+            config,
+            attention_implementation=_resolve_attention(
+                config.attention_implementation, self.device, self.dtype
+            ),
         )
         self.module = CODVAEModule(config).to(self.device, self.dtype).eval()
         self._grid_queries_cache: dict[int, torch.Tensor] = {}

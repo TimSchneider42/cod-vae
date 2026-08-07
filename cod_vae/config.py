@@ -6,7 +6,7 @@ from typing import Any, Literal, Mapping
 __all__ = ["AttentionImplementation", "CODVAEConfig"]
 
 
-AttentionImplementation = Literal["default", "cudnn"]
+AttentionImplementation = Literal["auto", "default", "cudnn"]
 
 
 @dataclass(frozen=True)
@@ -50,11 +50,12 @@ class CODVAEConfig:
     # Stochastic depth rate on residual branches; only used during training.
     droppath_rate: float = 0.1
 
-    # Attention kernel. "default" builds the (tokens x tokens) score matrix explicitly;
-    # "cudnn" uses cuDNN's fused kernel, which never materializes it and so cuts the
-    # backward pass's peak memory, but requires an even sequence length and a cuDNN able
-    # to build a plan for the shape -- it raises rather than falling back.
-    attention_implementation: AttentionImplementation = "default"
+    # Attention kernel. "default" builds the (tokens x tokens) score matrix explicitly.
+    # "cudnn" uses cuDNN's fused kernel, which never materializes it, cutting the
+    # backward pass's peak memory (and, measured against a float32 reference, is the
+    # more accurate of the two in half precision). "auto" picks cudnn when the backend
+    # can actually use it and falls back otherwise, logging which it chose.
+    attention_implementation: AttentionImplementation = "auto"
 
     @property
     def plane_resolution(self) -> int:

@@ -22,6 +22,8 @@ depth rate and rng; passing None (the default) yields deterministic eval-mode be
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 import math
 from functools import partial
 from typing import Mapping
@@ -57,6 +59,8 @@ __all__ = [
     "decode_uncertainty",
     "split_full_latent",
 ]
+
+logger = logging.getLogger(__name__)
 
 _LAYER_NORM_EPS = 1e-5
 
@@ -695,6 +699,45 @@ def decode_full(
     )
 
 
+def _resolve_attention(
+    requested: AttentionImplementation, device, dtype
+) -> AttentionImplementation:
+    """
+    Resolve "auto" to "cudnn" where the fused kernel can actually run, else "default".
+    Three things have to hold, and the last one is only knowable by trying: a CUDA
+    device, a half-precision compute dtype (cuDNN rejects float32 outright), and a cuDNN
+    able to build an execution plan -- which fails on installations whose NVRTC cannot
+    compile, independently of the GPU.
+    """
+    if requested != "auto":
+        return requested
+    if device.platform != "gpu":
+        logger.info("Attention: using the default kernel (no CUDA device).")
+        return "default"
+    if dtype not in (jnp.float16, jnp.bfloat16):
+        logger.info(
+            "Attention: using the default kernel (cuDNN needs float16/bfloat16, this "
+            "model computes in %s).",
+            jnp.dtype(dtype).name,
+        )
+        return "default"
+    probe = jax.ShapeDtypeStruct((1, 2, 1, 8), dtype)
+    try:
+        jax.jit(
+            lambda q, k, v: jax.nn.dot_product_attention(
+                q, k, v, implementation="cudnn"
+            )
+        ).lower(probe, probe, probe).compile()
+    except Exception as e:
+        logger.info(
+            "Attention: using the default kernel (cuDNN cannot build a plan here: %s).",
+            str(e).splitlines()[0][:120],
+        )
+        return "default"
+    logger.info("Attention: using cuDNN's fused kernel.")
+    return "cudnn"
+
+
 class CODVAEJax(CODVAEBase):
     """JAX backend of COD-VAE (see :class:`cod_vae.base.CODVAEBase`)."""
 
@@ -705,6 +748,12 @@ class CODVAEJax(CODVAEBase):
             device = jax.devices(device)[0]
         self.device = device if device is not None else jax.devices()[0]
         self.dtype = jnp.float32 if dtype is None else jnp.dtype(dtype)
+        config = dataclasses.replace(
+            config,
+            attention_implementation=_resolve_attention(
+                config.attention_implementation, self.device, self.dtype
+            ),
+        )
         self._grid_queries_cache: dict[int, "jnp.ndarray"] = {}
         # Parameters are committed to the device below; jitted computations follow them.
         self._jit_encode = jax.jit(partial(encode, config=config))
