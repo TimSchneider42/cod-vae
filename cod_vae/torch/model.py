@@ -344,13 +344,29 @@ class CODVAEModule(nn.Module):
 
     def _attention_ctx(self):
         """
-        Select the SDPA backend nn.MultiheadAttention dispatches to. "cudnn" pins cuDNN's
-        fused kernel, which never materializes the (tokens x tokens) score matrix and so
-        cuts the backward pass's peak memory; it raises rather than falling back if the
-        shape is unsupported. "default" leaves torch's own backend selection alone.
+        Select the SDPA backend nn.MultiheadAttention dispatches to. "cudnn" PREFERS
+        cuDNN's fused kernel, which never materializes the (tokens x tokens) score matrix
+        and so cuts the backward pass's peak memory. "default" leaves torch's own backend
+        selection alone.
+
+        The list is a priority order, not a restriction. Passing cuDNN alone pins it, and
+        torch then raises `No viable backend for scaled_dot_product_attention` rather than
+        falling back whenever the kernel cannot serve the call -- on CPU tensors, and on any
+        shape cuDNN does not support. Since the implementation is resolved once at model
+        construction, from the device and dtype alone, it cannot know the shapes it will
+        later be asked for; pinning would turn every such case into a crash. With the
+        fallbacks listed after it, cuDNN is still chosen wherever it is usable.
         """
         if self.config.attention_implementation == "cudnn":
-            return sdpa_kernel([SDPBackend.CUDNN_ATTENTION])
+            return sdpa_kernel(
+                [
+                    SDPBackend.CUDNN_ATTENTION,
+                    SDPBackend.FLASH_ATTENTION,
+                    SDPBackend.EFFICIENT_ATTENTION,
+                    SDPBackend.MATH,
+                ],
+                set_priority=True,
+            )
         return contextlib.nullcontext()
 
     def encode(self, pc: torch.Tensor) -> torch.Tensor:
@@ -519,10 +535,14 @@ class _LatentDecoder(nn.Module):
 
 def _resolve_attention(requested, device, dtype):
     """
-    Resolve "auto" to "cudnn" where the fused kernel can run, else "default". Needs a
-    CUDA device, a half-precision compute dtype (cuDNN rejects float32), and a cuDNN
-    build that supports the shape -- torch reports the last through
-    can_use_cudnn_attention, so unlike the jax side no trial compile is required.
+    Resolve "auto" to "cudnn" where the fused kernel can run, else "default". Needs a CUDA
+    device and a half-precision compute dtype; cuDNN rejects float32 outright.
+
+    Shape support is deliberately NOT checked here, because it cannot be: resolution
+    happens at model construction, long before any query shape is known. That is why
+    :meth:`CODVAEModule._attention_ctx` lists fallback backends after cuDNN rather than
+    pinning it -- an unsupported shape degrades to another kernel instead of raising. The
+    jax side needs a trial compile here precisely because it has no such fallback.
     """
     if requested != "auto":
         return requested
