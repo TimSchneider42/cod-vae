@@ -153,7 +153,13 @@ def _attention(
 
     q = split_heads(q, query_len)
     k, v = split_heads(k, source_len), split_heads(v, source_len)
-    if attn_impl == "cudnn":
+
+    def _manual(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
+        q, k, v = (x.transpose(0, 2, 1, 3) for x in (q, k, v))
+        scores = q @ k.transpose(0, 1, 3, 2) / math.sqrt(q.shape[-1])
+        return (jax.nn.softmax(scores, axis=-1) @ v).transpose(0, 2, 1, 3)
+
+    def _fused(q: jnp.ndarray, k: jnp.ndarray, v: jnp.ndarray) -> jnp.ndarray:
         # cuDNN rejects odd sequence lengths on the backward pass, and the decoder's
         # token count is always odd: 3 * plane_resolution ** 2 patches plus one register
         # token. Pad to even and mask the padded key so it contributes nothing. The
@@ -171,13 +177,30 @@ def _attention(
                 mask = jnp.ones((1, 1, q.shape[1], k.shape[1]), dtype=bool)
                 mask = mask.at[..., -1].set(False)
         # Default scale is 1/sqrt(head_dim), matching the manual path.
-        out = jax.nn.dot_product_attention(q, k, v, mask=mask, implementation="cudnn")[
+        return jax.nn.dot_product_attention(q, k, v, mask=mask, implementation="cudnn")[
             :, :query_len
         ]
+
+    # cuDNN only accepts half precision, and jax.nn.dot_product_attention validates that
+    # while TRACING -- before any platform dispatch can discard the branch. So the dtype has
+    # to gate the fused branch here, or a float32 model with the fused kernel selected raises
+    # "Unsupported dtype for inputs" on every platform, CPU included.
+    fused_ok = attn_impl == "cudnn" and q.dtype in (jnp.float16, jnp.bfloat16)
+    if fused_ok:
+        # Dispatch at LOWERING time, not once at model construction. The decoder is
+        # evaluated in two places: on the GPU inside the training loss, and on the CPU
+        # inside the environment's host callback, where the env computes its own
+        # reconstruction loss to produce the reward (loss_fn.numpy jits the very same
+        # function). A single global choice follows the model into both, and the cuDNN
+        # primitive has no CPU lowering rule at all -- it does not fall back, it raises
+        # `MLIR translation rule for primitive 'dot_product_attention_fwd' not found for
+        # platform cpu` from inside the callback, killing training minutes after the
+        # kernel was correctly selected for the GPU.
+        # platform_dependent lowers only the branch for the platform actually being
+        # compiled for, so the fused kernel never reaches a CPU executable.
+        out = jax.lax.platform_dependent(q, k, v, cuda=_fused, default=_manual)
     else:
-        q, k, v = (x.transpose(0, 2, 1, 3) for x in (q, k, v))
-        scores = q @ k.transpose(0, 1, 3, 2) / math.sqrt(q.shape[-1])
-        out = (jax.nn.softmax(scores, axis=-1) @ v).transpose(0, 2, 1, 3)
+        out = _manual(q, k, v)
     out = out.reshape(*lead, query_len, embed_dim)
     return _linear(params, f"{name}.out_proj", out)
 
