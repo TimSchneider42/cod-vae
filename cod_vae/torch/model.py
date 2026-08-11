@@ -303,11 +303,23 @@ class _Decoder(nn.Module):
         )
 
         ## project tokens to triplane patches; unrefined patches use the initial prediction
+        if not aux:
+            # The uncertainty is a per-token scalar, so u * decoder_out(full) equals
+            # decoder_out weights applied to u * full plus u * bias, and both
+            # projections fuse into a single GEMM over the concatenated inputs -- the
+            # separate init_patches (a patches-sized tensor written and re-read once
+            # per projection) is only needed by the aux training outputs.
+            stacked = torch.cat([init_tokens, uncertainty * full_tokens], dim=-1)
+            weight = torch.cat([self.init_out.weight, self.decoder_out.weight], dim=1)
+            patches = (
+                F.linear(stacked, weight)
+                + self.init_out.bias
+                + uncertainty * self.decoder_out.bias
+            )
+            return self.patches_to_planes(patches), None, None
         init_patches = self.init_out(init_tokens)
         patches = init_patches + uncertainty * self.decoder_out(full_tokens)
         planes = self.patches_to_planes(patches)
-        if not aux:
-            return planes, None, None
         resolution = config.plane_resolution
         uncertainty_planes = uncertainty.view(batch_size, 3, 1, resolution, resolution)
         return planes, self.patches_to_planes(init_patches), uncertainty_planes

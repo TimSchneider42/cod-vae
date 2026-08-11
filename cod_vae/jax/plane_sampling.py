@@ -135,8 +135,9 @@ def _scatter_plane_grads(
 @jax.custom_vjp
 def sample_planes_sum(planes: jnp.ndarray, queries: jnp.ndarray) -> jnp.ndarray:
     """
-    Sum-mode triplane sampling (planes (B, 3, C, H, W) float32, queries (B, N, 3)
-    float32 already clipped to the sampling range) with the custom backward scatter.
+    Sum-mode triplane sampling (planes (B, 3, C, H, W) in the model's compute dtype,
+    queries (B, N, 3) float32 already clipped to the sampling range, float32 output)
+    with the custom backward scatter.
     """
     return _native_sum(planes, queries)
 
@@ -153,7 +154,10 @@ def _bwd(residuals, dfeat):
     coords = jnp.stack(
         [queries[..., [1, 2]], queries[..., [0, 2]], queries[..., [0, 1]]], axis=1
     )
-    dplanes = _scatter_plane_grads(coords, dfeat, height, width)
+    # The scatter accumulates in float32; a half-precision model receives its plane
+    # cotangent rounded to the plane dtype, exactly as the former explicit
+    # float32-cast-then-sample formulation did through the cast's adjoint.
+    dplanes = _scatter_plane_grads(coords, dfeat, height, width).astype(planes.dtype)
     _, native_vjp = jax.vjp(lambda q: _native_sum(planes, q), queries)
     (dqueries,) = native_vjp(dfeat)
     return dplanes, dqueries

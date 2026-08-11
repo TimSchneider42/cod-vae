@@ -567,13 +567,31 @@ def decode_embed(
     )
 
     ## project tokens to triplane patches; unrefined patches use the initial prediction
+    if not aux:
+        # The uncertainty is a per-token scalar, so u * (full @ W_dec^T + b_dec)
+        # equals (u * full) @ W_dec^T + u * b_dec, and both projections fuse into a
+        # single GEMM over the concatenated inputs -- the separate init_patches (a
+        # patches-sized tensor written and re-read once per projection) is only
+        # needed by the aux training outputs.
+        stacked = jnp.concatenate([init_tokens, uncertainty * full_tokens], axis=-1)
+        weight = jnp.concatenate(
+            [
+                params["autoencoder.decoder.init_out.weight"],
+                params["autoencoder.decoder.decoder_out.weight"],
+            ],
+            axis=1,
+        )
+        patches = (
+            stacked @ weight.T
+            + params["autoencoder.decoder.init_out.bias"]
+            + uncertainty * params["autoencoder.decoder.decoder_out.bias"]
+        )
+        return _patches_to_planes(patches, config), None, None
     init_patches = _linear(params, "autoencoder.decoder.init_out", init_tokens)
     patches = init_patches + uncertainty * _linear(
         params, "autoencoder.decoder.decoder_out", full_tokens
     )
     planes = _patches_to_planes(patches, config)
-    if not aux:
-        return planes, None, None
     resolution = config.plane_resolution
     uncertainty_planes = uncertainty.reshape(batch_size, 3, 1, resolution, resolution)
     return planes, _patches_to_planes(init_patches, config), uncertainty_planes
@@ -608,7 +626,11 @@ def _grid_sample_plane(plane: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
         (y0.astype(jnp.int32), 1.0 - (y - y0)),
         (y0.astype(jnp.int32) + 1, y - y0),
     ]
-    result = jnp.zeros((coords.shape[0], channels), dtype=plane.dtype)
+    # The accumulation runs in the weights' float32 regardless of the plane dtype:
+    # half-precision texel values are promoted losslessly inside the weighted sum,
+    # which XLA fuses into the gather -- materializing a float32 copy of the planes
+    # first would cost a full extra pass over them.
+    result = jnp.zeros((coords.shape[0], channels), dtype=jnp.float32)
     for xi, wx in weights_x:
         for yi, wy in weights_y:
             valid = (xi >= 0) & (xi < width) & (yi >= 0) & (yi < height)
@@ -633,7 +655,6 @@ def _sample_planes(planes: jnp.ndarray, queries: jnp.ndarray, mode: str) -> jnp.
     out, e.g. for callers that vmap the decode path, which the kernel does not
     support).
     """
-    planes = planes.astype(jnp.float32)
     queries = jnp.clip(queries.astype(jnp.float32), -1.0, 0.999)
     num_channels = planes.shape[2]
     if (
