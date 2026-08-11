@@ -25,6 +25,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import os
 from functools import partial
 from typing import Mapping
 
@@ -625,9 +626,25 @@ def _sample_planes(planes: jnp.ndarray, queries: jnp.ndarray, mode: str) -> jnp.
     which cancels catastrophically at half precision (measurably degrading the
     bounding box gradients of :func:`decode_logits_full`). The features are returned in
     float32; callers feeding them to a half-precision head must cast them back.
+
+    On a GPU, the sum mode (the decoding path) uses a Pallas/Triton kernel for the
+    backward scatter into the plane gradients, which XLA's scatter lowering handles
+    poorly (see :mod:`cod_vae.jax.plane_sampling`; COD_VAE_NO_PALLAS_SAMPLER=1 opts
+    out, e.g. for callers that vmap the decode path, which the kernel does not
+    support).
     """
     planes = planes.astype(jnp.float32)
     queries = jnp.clip(queries.astype(jnp.float32), -1.0, 0.999)
+    num_channels = planes.shape[2]
+    if (
+        mode == "sum"
+        and jax.default_backend() == "gpu"
+        and num_channels & (num_channels - 1) == 0  # Triton needs a power of two
+        and not os.environ.get("COD_VAE_NO_PALLAS_SAMPLER")
+    ):
+        from .plane_sampling import sample_planes_sum
+
+        return sample_planes_sum(planes, queries)
     result = None
     for axis in range(3):
         other_axes = [j for j in range(3) if j != axis]
