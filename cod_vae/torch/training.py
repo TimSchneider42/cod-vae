@@ -110,7 +110,7 @@ class _LossModule(nn.Module):
         target = F.layer_norm(z_enc, z_enc.shape[-1:]).detach()
         feat_loss = F.mse_loss(z_recon, target)
 
-        planes = self.module.decode_embed(z_recon)[0]
+        planes = self.module.decode_embed(z_recon, aux=False)[0]
         logits = self.module.decode_logits(planes, queries)
         recon_loss = _occupancy_loss(
             logits, labels, self.num_vol_queries, cfg.vol_coeff, cfg.near_coeff

@@ -131,7 +131,7 @@ def _stage2_loss(
     target = jax.lax.stop_gradient(_layer_norm_no_affine(z_enc))
     feat_loss = jnp.mean((z_recon - target) ** 2)
 
-    planes = decode_embed(params, z_recon, config=config)[0]
+    planes = decode_embed(params, z_recon, config=config, aux=False)[0]
     logits = decode_logits(params, planes, batch["queries"], config=config)
     recon_loss = _occupancy_loss(
         logits, batch["labels"], num_vol, cfg.vol_coeff, cfg.near_coeff

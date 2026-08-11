@@ -279,17 +279,8 @@ def _point_embed(params, points: jnp.ndarray) -> jnp.ndarray:
     return _linear(params, "autoencoder.point_embed.mlp", features)
 
 
-def farthest_point_sampling(
-    points: jnp.ndarray, num_samples: int, canonicalize: bool = True
-) -> jnp.ndarray:
-    """
-    Farthest point sampling of an unbatched point cloud (N, 3) -> (num_samples, 3),
-    starting from the first point. With canonicalize=True, the (arbitrary) FPS ordering
-    is replaced by lexicographic order so the result is a deterministic function of the
-    point set.
-    """
-
-    points = jnp.asarray(points)
+def _fps_indices(points: jnp.ndarray, num_samples: int) -> jnp.ndarray:
+    """The greedy FPS selection: unbatched point cloud (N, 3) -> indices (num_samples,)."""
 
     def body(j, state):
         indices, distances = state
@@ -300,7 +291,20 @@ def farthest_point_sampling(
     indices = jnp.zeros(num_samples, dtype=jnp.int32)
     distances = jnp.full(points.shape[0], jnp.inf, dtype=points.dtype)
     indices, _ = jax.lax.fori_loop(1, num_samples, body, (indices, distances))
-    selected = points[indices]
+    return indices
+
+
+def farthest_point_sampling(
+    points: jnp.ndarray, num_samples: int, canonicalize: bool = True
+) -> jnp.ndarray:
+    """
+    Farthest point sampling of an unbatched point cloud (N, 3) -> (num_samples, 3),
+    starting from the first point. With canonicalize=True, the (arbitrary) FPS ordering
+    is replaced by lexicographic order so the result is a deterministic function of the
+    point set.
+    """
+    points = jnp.asarray(points)
+    selected = points[_fps_indices(points, num_samples)]
     if canonicalize:
         selected = selected[jnp.lexsort(selected.T[::-1])]
     return selected
@@ -315,17 +319,31 @@ def encode_embed(
 ) -> jnp.ndarray:
     """Encode surface point clouds (B, N, 3) into latent embeddings (B, L, embed_dim)."""
     num_heads = config.num_heads
-    z = jax.vmap(partial(farthest_point_sampling, num_samples=config.num_latents))(
-        points
+    # Greedy FPS selections are prefix-stable, so one run yields both the latent
+    # positions (first num_latents picks) and the encoder patch positions.
+    indices = jax.vmap(
+        partial(
+            _fps_indices,
+            num_samples=max(config.num_latents, config.encoder_num_patches),
+        )
+    )(points)
+
+    def take(selected):
+        return selected[jnp.lexsort(selected.T[::-1])]
+
+    z = jax.vmap(take)(
+        jnp.take_along_axis(points, indices[:, : config.num_latents, None], axis=1)
     )
     z = _layer_norm(params, "autoencoder.norm_latent", _point_embed(params, z))
 
     point_features = _layer_norm(
         params, "autoencoder.encoder.norm_point", _point_embed(params, points)
     )
-    patch_pos = jax.vmap(
-        partial(farthest_point_sampling, num_samples=config.encoder_num_patches)
-    )(points)
+    patch_pos = jax.vmap(take)(
+        jnp.take_along_axis(
+            points, indices[:, : config.encoder_num_patches, None], axis=1
+        )
+    )
     patches = _layer_norm(
         params, "autoencoder.encoder.norm_point", _point_embed(params, patch_pos)
     )
@@ -482,11 +500,13 @@ def decode_embed(
     *,
     config: CODVAEConfig,
     dp: DropPath | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    aux: bool = True,
+) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
     """
     Decode latent embeddings (B, L, embed_dim) into triplane features: returns (planes,
     init_planes, uncertainty_planes) of shapes (B, 3, query_dim, R, R) twice and
-    (B, 3, 1, plane_resolution, plane_resolution).
+    (B, 3, 1, plane_resolution, plane_resolution). With aux=False, the init/uncertainty
+    planes (training-only) are not materialized and (planes, None, None) is returned.
     """
     num_heads = config.num_heads
     batch_size = z.shape[0]
@@ -550,13 +570,12 @@ def decode_embed(
     patches = init_patches + uncertainty * _linear(
         params, "autoencoder.decoder.decoder_out", full_tokens
     )
+    planes = _patches_to_planes(patches, config)
+    if not aux:
+        return planes, None, None
     resolution = config.plane_resolution
     uncertainty_planes = uncertainty.reshape(batch_size, 3, 1, resolution, resolution)
-    return (
-        _patches_to_planes(patches, config),
-        _patches_to_planes(init_patches, config),
-        uncertainty_planes,
-    )
+    return planes, _patches_to_planes(init_patches, config), uncertainty_planes
 
 
 def decode_planes(
@@ -567,7 +586,7 @@ def decode_planes(
     (B, 3, query_dim, output_resolution, output_resolution).
     """
     z = decode_latents(params, latent, config=config)
-    return decode_embed(params, z, config=config)[0]
+    return decode_embed(params, z, config=config, aux=False)[0]
 
 
 def _grid_sample_plane(plane: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:

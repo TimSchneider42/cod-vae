@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import logging
+import os
 
 import numpy as np
 import torch
@@ -48,12 +49,68 @@ logger = logging.getLogger(__name__)
 
 
 def _lexsort_indices(points: torch.Tensor) -> torch.Tensor:
-    """Indices sorting points (M, 3) lexicographically (x primary, then y, then z)."""
-    indices = torch.arange(points.shape[0], device=points.device)
+    """Indices sorting points (B, M, 3) lexicographically (x primary, then y, then z)."""
+    batch_size, length, _ = points.shape
+    indices = torch.arange(length, device=points.device).expand(batch_size, length)
     for dim in (2, 1, 0):
-        order = torch.sort(points[indices, dim], stable=True).indices
-        indices = indices[order]
+        keys = torch.gather(points[..., dim], 1, indices)
+        order = torch.sort(keys, dim=1, stable=True).indices
+        indices = torch.gather(indices, 1, order)
     return indices
+
+
+def _fps_loop(points: torch.Tensor, num_samples: int) -> torch.Tensor:
+    """The greedy FPS selection: point clouds (B, N, 3) -> indices (B, num_samples)."""
+    batch_size, num_points, _ = points.shape
+    batch = torch.arange(batch_size, device=points.device)
+    indices = points.new_zeros((batch_size, num_samples), dtype=torch.long)
+    distances = points.new_full((batch_size, num_points), torch.inf)
+    last = points[:, 0]
+    for j in range(1, num_samples):
+        delta = points - last[:, None]
+        distances = torch.minimum(distances, (delta * delta).sum(-1))
+        indices[:, j] = distances.argmax(1)
+        last = points[batch, indices[:, j]]
+    return indices
+
+
+# The FPS loop is hundreds of sequential, tiny kernels and is launch-overhead-bound on
+# GPU, so replay it as a captured CUDA graph per (device, batch, points, samples) shape.
+_fps_graphs: dict[tuple, tuple | None] = {}
+
+
+def _fps_indices(points: torch.Tensor, num_samples: int) -> torch.Tensor:
+    if not points.is_cuda or os.environ.get("COD_VAE_NO_FPS_GRAPH"):
+        return _fps_loop(points, num_samples)
+    key = (points.device.index, points.shape[0], points.shape[1], num_samples)
+    entry = _fps_graphs.get(key)
+    if entry is None and key not in _fps_graphs:
+        entry = _fps_graphs[key] = _fps_capture(points, num_samples)
+    if entry is None:
+        return _fps_loop(points, num_samples)
+    graph, static_points, static_indices = entry
+    static_points.copy_(points)
+    graph.replay()
+    return static_indices.clone()
+
+
+def _fps_capture(points: torch.Tensor, num_samples: int) -> tuple | None:
+    try:
+        with torch.no_grad():
+            static_points = points.clone()
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(2):
+                    _fps_loop(static_points, num_samples)
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            # thread_local keeps other threads (e.g. NCCL watchdogs) out of the capture
+            with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+                static_indices = _fps_loop(static_points, num_samples)
+        return graph, static_points, static_indices
+    except Exception:
+        return None
 
 
 def farthest_point_sampling(
@@ -65,19 +122,11 @@ def farthest_point_sampling(
     is replaced by lexicographic order so the result is a deterministic function of the
     point set.
     """
-    batch_size, num_points, _ = points.shape
-    batch = torch.arange(batch_size, device=points.device)
-    indices = points.new_zeros((batch_size, num_samples), dtype=torch.long)
-    distances = points.new_full((batch_size, num_points), torch.inf)
-    last = points[:, 0]
-    for j in range(1, num_samples):
-        delta = points - last[:, None]
-        distances = torch.minimum(distances, (delta * delta).sum(-1))
-        indices[:, j] = distances.argmax(1)
-        last = points[batch, indices[:, j]]
-    selected = points[batch[:, None], indices]
+    indices = _fps_indices(points, num_samples)
+    selected = torch.gather(points, 1, indices.unsqueeze(-1).expand(-1, -1, 3))
     if canonicalize:
-        selected = torch.stack([s[_lexsort_indices(s)] for s in selected])
+        order = _lexsort_indices(selected)
+        selected = torch.gather(selected, 1, order.unsqueeze(-1).expand(-1, -1, 3))
     return selected
 
 
@@ -94,10 +143,15 @@ class _Encoder(nn.Module):
         self.last_block = CrossAttnBlock(dim, heads, ratio, droppath=dp)
 
     def forward(
-        self, pc: torch.Tensor, z: torch.Tensor, point_embed: PointEmbed
+        self,
+        pc: torch.Tensor,
+        z: torch.Tensor,
+        point_embed: PointEmbed,
+        patch_pos: torch.Tensor | None = None,
     ) -> torch.Tensor:
         point_features = self.norm_point(point_embed(pc))
-        patch_pos = farthest_point_sampling(pc, self.config.encoder_num_patches)
+        if patch_pos is None:
+            patch_pos = farthest_point_sampling(pc, self.config.encoder_num_patches)
         patches = self.norm_point(point_embed(patch_pos))
         for block in self.blocks:
             point_features, patches, z = block(point_features, patches, z)
@@ -215,9 +269,13 @@ class _Decoder(nn.Module):
         )
 
     def forward(
-        self, z: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Decode latent embeddings into (planes, init_planes, uncertainty_planes)."""
+        self, z: torch.Tensor, aux: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """
+        Decode latent embeddings into (planes, init_planes, uncertainty_planes).
+        With aux=False, the init/uncertainty planes (training-only) are not
+        materialized and (planes, None, None) is returned.
+        """
         config = self.config
         batch_size = z.shape[0]
         tokens = self.mask_pos.unsqueeze(0).expand(batch_size, -1, -1)
@@ -247,13 +305,12 @@ class _Decoder(nn.Module):
         ## project tokens to triplane patches; unrefined patches use the initial prediction
         init_patches = self.init_out(init_tokens)
         patches = init_patches + uncertainty * self.decoder_out(full_tokens)
+        planes = self.patches_to_planes(patches)
+        if not aux:
+            return planes, None, None
         resolution = config.plane_resolution
         uncertainty_planes = uncertainty.view(batch_size, 3, 1, resolution, resolution)
-        return (
-            self.patches_to_planes(patches),
-            self.patches_to_planes(init_patches),
-            uncertainty_planes,
-        )
+        return planes, self.patches_to_planes(init_patches), uncertainty_planes
 
     def patches_to_planes(self, patches: torch.Tensor) -> torch.Tensor:
         config = self.config
@@ -383,15 +440,18 @@ class CODVAEModule(nn.Module):
             return self.latent_decoder(self.latent_proj_out(latent))
 
     def decode_embed(
-        self, z: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Decode latent embeddings into (planes, init_planes, uncertainty_planes)."""
+        self, z: torch.Tensor, aux: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+        """
+        Decode latent embeddings into (planes, init_planes, uncertainty_planes);
+        aux=False skips materializing the training-only init/uncertainty planes.
+        """
         with self._attention_ctx():
-            return self.autoencoder.decoder(z)
+            return self.autoencoder.decoder(z, aux=aux)
 
     def decode_planes(self, latent: torch.Tensor) -> torch.Tensor:
         """Decode latents (B, L, latent_dim) into triplanes (B, 3, C, R, R)."""
-        return self.decode_embed(self.decode_latents(latent))[0]
+        return self.decode_embed(self.decode_latents(latent), aux=False)[0]
 
     def decode_logits(
         self, planes: torch.Tensor, queries: torch.Tensor
@@ -507,9 +567,19 @@ class _Autoencoder(nn.Module):
         )
 
     def encode_embed(self, pc: torch.Tensor) -> torch.Tensor:
-        z = farthest_point_sampling(pc, self.config.num_latents)
-        z = self.norm_latent(self.point_embed(z))
-        return self.encoder(pc, z, self.point_embed)
+        # Greedy FPS selections are prefix-stable, so one run yields both the latent
+        # positions (first num_latents picks) and the encoder patch positions.
+        config = self.config
+        indices = _fps_indices(pc, max(config.num_latents, config.encoder_num_patches))
+
+        def take(count: int) -> torch.Tensor:
+            sel = torch.gather(pc, 1, indices[:, :count, None].expand(-1, -1, 3))
+            order = _lexsort_indices(sel)
+            return torch.gather(sel, 1, order.unsqueeze(-1).expand(-1, -1, 3))
+
+        z = self.norm_latent(self.point_embed(take(config.num_latents)))
+        patch_pos = take(config.encoder_num_patches)
+        return self.encoder(pc, z, self.point_embed, patch_pos)
 
 
 class _LatentDecoder(nn.Module):
