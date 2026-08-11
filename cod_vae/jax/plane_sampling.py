@@ -21,8 +21,12 @@ The kernel requires a GPU; :data:`_interpret` runs it in Pallas's interpreter fo
 CPU-only tests. Beware that the interpreter resolves duplicate indices within one
 atomic call as last-write-wins instead of accumulating (GPU hardware atomics
 accumulate correctly), so interpreter-based tests must keep each atomic call's
-target texels pairwise distinct. It does not define a batching rule, so it must not
-be vmapped -- callers with extra leading axes should reshape them into the batch.
+target texels pairwise distinct.
+
+vmap is supported: ``jax.custom_vjp`` batches the fwd/bwd functions and
+``pallas_call`` has its own batching rule that lifts the mapped axis into the launch
+grid. Verified on the GPU Triton lowering against per-element loops -- gradients
+match to float32 noise (and to fp16 rounding for a half-precision model).
 """
 
 from __future__ import annotations

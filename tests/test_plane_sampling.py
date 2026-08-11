@@ -75,6 +75,21 @@ def test_gradients_match_native_under_jit():
     np.testing.assert_allclose(dp_custom, dp_native, atol=1e-5, rtol=1e-5)
 
 
+def test_vmap_gradients_match_per_element():
+    # custom_vjp batches its fwd/bwd and pallas_call has a batching rule, so the
+    # sampler is vmappable; this pins that contract (GPU-verified separately).
+    planes, queries, cotangent = _distinct_texel_case(batch=1, queries=8)
+    stacked_p = jnp.stack([planes, planes * 2.0])
+    stacked_q = jnp.stack([queries, queries])
+
+    def loss(p, q):
+        return jnp.sum(sample_planes_sum(p, q) * cotangent)
+
+    out = jax.vmap(jax.grad(loss))(stacked_p, stacked_q)
+    ref = jnp.stack([jax.grad(loss)(stacked_p[i], stacked_q[i]) for i in range(2)])
+    np.testing.assert_allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+
 def test_border_corners_are_dropped(monkeypatch):
     # A single query (block 1: no padding lanes, so no duplicate clamped indices in
     # the interpreter) in the outermost texel: the out-of-range corners must be

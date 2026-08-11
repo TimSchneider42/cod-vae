@@ -651,9 +651,8 @@ def _sample_planes(planes: jnp.ndarray, queries: jnp.ndarray, mode: str) -> jnp.
 
     On a GPU, the sum mode (the decoding path) uses a Pallas/Triton kernel for the
     backward scatter into the plane gradients, which XLA's scatter lowering handles
-    poorly (see :mod:`cod_vae.jax.plane_sampling`; COD_VAE_NO_PALLAS_SAMPLER=1 opts
-    out, e.g. for callers that vmap the decode path, which the kernel does not
-    support).
+    poorly (see :mod:`cod_vae.jax.plane_sampling`; vmap is supported, and
+    COD_VAE_NO_PALLAS_SAMPLER=1 opts back into the native XLA adjoint).
     """
     queries = jnp.clip(queries.astype(jnp.float32), -1.0, 0.999)
     num_channels = planes.shape[2]
