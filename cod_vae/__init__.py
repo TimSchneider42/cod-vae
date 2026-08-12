@@ -30,7 +30,7 @@ except ImportError:  # not installed / no build metadata available
 
 from .base import CODVAEBase
 from .checkpoint import Params, load_npz, load_torch_release, save_npz
-from .config import CODVAEConfig
+from .config import AttentionImplementation, CODVAEConfig
 from .hub import DEFAULT_WEIGHTS_FILENAME, download_pretrained
 from .init import init_params
 from .mesh import (
@@ -92,7 +92,24 @@ def _mk_jax(config, params, device, dtype=None) -> "CODVAEJax":
     return CODVAEJax(config, params, device=device, dtype=dtype)
 
 
-def _make(config, params, backend: Backend, device, dtype: DType = None) -> CODVAEBase:
+def _make(
+    config,
+    params,
+    backend: Backend,
+    device,
+    dtype: DType = None,
+    attention_implementation: AttentionImplementation | None = None,
+) -> CODVAEBase:
+    # The attention kernel is an execution policy like dtype, not an architectural
+    # property: no weight depends on it, and the right choice belongs to the host
+    # GPU and call-site sequence lengths, not to whoever trained the checkpoint.
+    # The serialized config only carries a default; the loader argument overrides it.
+    if attention_implementation is not None:
+        import dataclasses
+
+        config = dataclasses.replace(
+            config, attention_implementation=attention_implementation
+        )
     if backend == "torch":
         return _mk_torch(config, params, device, dtype)
     if backend == "jax":
@@ -127,8 +144,9 @@ class CODVAE:
         backend: Backend = "auto",
         device: str | None = None,
         dtype: DType = None,
+        attention_implementation: AttentionImplementation | None = None,
     ) -> CODVAEBase:
-        return _make(config, params, backend, device, dtype)
+        return _make(config, params, backend, device, dtype, attention_implementation)
 
     @classmethod
     def from_pretrained(
@@ -140,6 +158,7 @@ class CODVAE:
         backend: Backend = "auto",
         device: str | None = None,
         dtype: DType = None,
+        attention_implementation: AttentionImplementation | None = None,
     ) -> CODVAEBase:
         """
         Load a model from a Hugging Face Hub repository id, a local npz file, or a local
@@ -149,6 +168,13 @@ class CODVAE:
         its memory footprint and roughly double its throughput on GPUs); the numpy
         interface stays float32 regardless, as does the triplane interpolation (see
         :attr:`cod_vae.CODVAEBase.dtype`).
+
+        ``attention_implementation`` overrides the checkpoint's attention-kernel
+        choice at load time, exactly like ``dtype``: it is an execution policy, not
+        part of the architecture. "default" builds the score matrix explicitly and
+        wins on the short decode-side sequences; "cudnn" never materializes it,
+        cutting backward peak memory on long sequences; "auto" probes what the host
+        supports. None keeps whatever the checkpoint carries.
         """
         path = Path(model_name_or_path)
         if path.is_file():
@@ -161,7 +187,7 @@ class CODVAE:
                 filename=filename or DEFAULT_WEIGHTS_FILENAME,
                 revision=revision,
             )
-        return _make(config, params, backend, device, dtype)
+        return _make(config, params, backend, device, dtype, attention_implementation)
 
     @classmethod
     def load(
@@ -171,10 +197,11 @@ class CODVAE:
         backend: Backend = "auto",
         device: str | None = None,
         dtype: DType = None,
+        attention_implementation: AttentionImplementation | None = None,
     ) -> CODVAEBase:
         """Load a model from a local npz file written by :meth:`CODVAEBase.save`."""
         config, params = load_npz(path)
-        return _make(config, params, backend, device, dtype)
+        return _make(config, params, backend, device, dtype, attention_implementation)
 
     @classmethod
     def from_torch_release(
@@ -184,10 +211,11 @@ class CODVAE:
         backend: Backend = "auto",
         device: str | None = None,
         dtype: DType = None,
+        attention_implementation: AttentionImplementation | None = None,
     ) -> CODVAEBase:
         """Load a model from an official COD-VAE release directory (requires torch)."""
         config, params = load_torch_release(weights_dir)
-        return _make(config, params, backend, device, dtype)
+        return _make(config, params, backend, device, dtype, attention_implementation)
 
     @classmethod
     def from_random(
@@ -198,7 +226,15 @@ class CODVAE:
         backend: Backend = "auto",
         device: str | None = None,
         dtype: DType = None,
+        attention_implementation: AttentionImplementation | None = None,
     ) -> CODVAEBase:
         """Create a randomly initialized model (e.g. as a starting point for training)."""
         config = config if config is not None else CODVAEConfig()
-        return _make(config, init_params(config, seed=seed), backend, device, dtype)
+        return _make(
+            config,
+            init_params(config, seed=seed),
+            backend,
+            device,
+            dtype,
+            attention_implementation,
+        )

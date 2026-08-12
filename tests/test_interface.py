@@ -307,3 +307,21 @@ def test_save_load_roundtrip(model, tmp_path, point_batch):
     np.testing.assert_allclose(
         model.encode(point_batch), reloaded.encode(point_batch), atol=1e-6
     )
+
+
+def test_attention_implementation_is_a_load_time_override(
+    tmp_path, tiny_config, tiny_params
+):
+    # The kernel choice is an execution policy like dtype: the checkpoint carries a
+    # default, and the loader argument overrides it without touching the artifact.
+    from cod_vae import CODVAE, save_npz
+
+    path = tmp_path / "model.npz"
+    save_npz(path, tiny_config, tiny_params)
+    # Without an override, the checkpoint's choice flows through (the backend then
+    # resolves "auto" for the host it is actually on -- "default" off-GPU).
+    kept = CODVAE.load(path)
+    assert kept.config.attention_implementation == "default"
+    # An explicit override replaces the checkpoint's choice verbatim.
+    overridden = CODVAE.load(path, attention_implementation="cudnn")
+    assert overridden.config.attention_implementation == "cudnn"
