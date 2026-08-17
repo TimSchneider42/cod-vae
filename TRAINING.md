@@ -257,6 +257,39 @@ vae = CODVAE.load("runs/m32/stage2_d32/checkpoint_last.npz")
 vae.push_to_hub("TimSchneider42/cod-vae-32x32")
 ```
 
+## How the published cod-vae-16xM-small models were trained
+
+The `TimSchneider42/cod-vae-16x<latent_dim>-small` models are decode-optimized variants: ~39M parameters instead of 188M, with a ~20M decode path instead of 90M, selected in an ablation campaign whose target was decode-path throughput *including the backward pass* (for pipelines that train through the frozen decoder) under a hard quality floor of 0.83 held-out ABC IoU for the 16x8 configuration.
+The winning architecture halves the width, trims the encoder, quarters the refinement-decoder tokens with 16-px triplane patches, halves the query-plane channels, and doubles the latent decoder back to 12 layers to buy quality where it is cheap:
+
+```bash
+SMALL_ARCH="--arch embed_dim=256 --arch num_heads=4 --arch encoder_num_blocks=3 \
+    --arch decoder_num_layers=6 --arch decoder_output_patch_size=16 --arch query_dim=16"
+```
+
+Same merged dataset as above. Stage 1 runs **200 epochs** rather than the reference 100 — measured worth +0.009 trunk IoU (~+0.003 after stage 2) — and the small models are dataloader-bound at 4 GPUs, so 2 GPUs at twice the per-GPU batch give the same wall-clock at half the allocation:
+
+```bash
+# Stage 1, once for the 16-latent trunk (2 GPUs, effective batch 256, 200 epochs)
+torchrun --nproc_per_node=2 examples/train_shapenet.py data/merged runs/small-m16/stage1 \
+    --stage 1 --num-latents 16 --epochs 200 --batch-size 128 \
+    --repeat 8 --num-workers 10 --tf32 --resume $SMALL_ARCH
+
+# Stage 2, one run per latent width (2 GPUs, effective batch 512, 100 epochs)
+for d in 4 8 16; do
+    torchrun --nproc_per_node=2 examples/train_shapenet.py data/merged runs/small-m16/stage2_d$d \
+        --stage 2 --init-from runs/small-m16/stage1/checkpoint_last.npz \
+        --latent-dim $d --epochs 100 --batch-size 256 \
+        --repeat 8 --num-workers 10 --tf32 --resume --arch num_latent_layers=12
+done
+```
+
+Note the two `--arch` sets: the stage-1 flags define the autoencoder and are inherited by stage 2 from the checkpoint; `num_latent_layers=12` belongs to stage 2 (the latent decoder only trains there).
+Everything else is the reference recipe (learning rate, clipping, seed, LR milestones — stage 2's absolute 60/70/80/90 schedule is unaffected by the longer stage 1).
+Published checkpoints additionally pin `attention_implementation="default"` in their config: on this architecture's short decode sequences the XLA attention path is ~1.3x faster than the cuDNN kernel that "auto" selects at half precision.
+
+The choices behind each knob were measured one ablation at a time (width 512/384/256/128, patches 8/16/32, decoder depth 4/6/8, latent decoder 4/6/12, encoder blocks, keep ratio 0.5–0.10, query_dim 32/16), each candidate judged by its own stage-2 IoU — stage-1 gaps repeatedly failed to predict stage-2 verdicts across architecture changes.
+
 ## Known differences from the reference training
 
 - **Precision**: the reference trains with 16-mixed precision; these trainers run in full float32. Expect roughly twice the per-step cost.

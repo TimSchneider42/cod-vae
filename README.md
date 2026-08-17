@@ -124,6 +124,20 @@ Returns also flatten toward the top-right corner: at `num_latents=64` the last d
 ABC is the harder of the two evaluation sources at every size but the smallest, where the ordering reverses (`4x4` scores 0.671 on ABC against 0.630 on MNIST3D) — with 16 numbers per shape the reconstruction is too coarse for the digit geometry to survive at all.
 The corresponding MNIST3D figures are on each model card.
 
+#### Decode-optimized small models
+
+For pipelines where decoding speed matters — especially ones that backpropagate through the frozen decoder — a `-small` variant of each model is published under the same name plus the `-small` suffix: ~39M parameters instead of 188M (decode path ~20M instead of 90M), roughly **8x faster forward+backward** (23.6k vs 2.9k shapes/s at batch 1024 x 2048 queries, H100, JAX float16), measured ~9x end-to-end in a downstream RL loop that trains through the decoder.
+
+| model | ABC volume IoU (full-size) | near-surface accuracy (full-size) |
+|---|---|---|
+| [cod-vae-16x4-small](https://huggingface.co/TimSchneider42/cod-vae-16x4-small) | 0.762 (0.782) | 0.746 (0.770) |
+| [cod-vae-16x8-small](https://huggingface.co/TimSchneider42/cod-vae-16x8-small) | 0.842 (0.873) | 0.804 (0.835) |
+| [cod-vae-16x16-small](https://huggingface.co/TimSchneider42/cod-vae-16x16-small) | 0.872 (0.903) | 0.830 (0.863) |
+
+The ~8x speedup costs a fairly uniform 0.02–0.03 IoU across latent widths.
+Each `-small` model has the same latent shape as its full-size counterpart — but a **different latent space**: latents from one cannot be decoded with the other.
+The remaining rows of the small grid (4 and 8 latents) are training and will be published the same way; see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-16xm-small-models-were-trained) for the architecture and exact training commands.
+
 ## Training
 
 Both stages of the paper's recipe can be trained with this package, on either backend and on multiple GPUs, either directly on a directory of arbitrary (not necessarily watertight) meshes or on a dataset built ahead of time with `cod-vae-dataset`:
