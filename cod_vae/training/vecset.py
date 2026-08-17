@@ -140,10 +140,20 @@ class ShapeNetVecSetDataset:
         seed: int = 0,
         near_groups: int = 2,
         io_retry_seconds: float = 240.0,
+        teacher_logit_dir: Path | str | None = None,
     ):
         self.root_dir = Path(root_dir)
         self.point_dir = self.root_dir / "ShapeNetV2_point"
         self.surface_dir = self.root_dir / "ShapeNetV2_surface"
+        # A directory tree mirroring ShapeNetV2_point ({category}/{object_id}.npz with
+        # "vol_logit" and "near_logit" rows aligned with the pool files) makes every
+        # item also carry "teacher_logits" — a teacher model's logits at the very query
+        # points served, for distillation. Occupancy at a query point is invariant
+        # under the AxisScaling augmentation, and so are the teacher's precomputed
+        # logits, exactly like the hard labels.
+        self.teacher_logit_dir = (
+            Path(teacher_logit_dir) if teacher_logit_dir is not None else None
+        )
         self.pc_size = pc_size
         self.num_vol_queries = num_vol_queries
         self.num_near_queries = num_near_queries
@@ -267,6 +277,7 @@ class ShapeNetVecSetDataset:
             near_total = queries_file.length("near_points")
             groups = self.near_groups if near_total % self.near_groups == 0 else 1
             group_size = near_total // groups
+            near_blocks = []
             for group in range(groups):
                 count = self.num_near_queries // groups
                 if group == groups - 1:
@@ -274,6 +285,7 @@ class ShapeNetVecSetDataset:
                 near_start = self._start(
                     rng, group_size, count, offset=group * group_size
                 )
+                near_blocks.append((near_start, count))
                 blocks.append(
                     (
                         queries_file.rows("near_points", near_start, count),
@@ -283,10 +295,24 @@ class ShapeNetVecSetDataset:
         queries = np.concatenate([points for points, _ in blocks]).astype(np.float32)
         labels = np.concatenate([label for _, label in blocks]).astype(np.float32)
 
+        item = {}
+        if self.teacher_logit_dir is not None:
+            with _PoolFile(
+                self.teacher_logit_dir / category / f"{object_id}.npz"
+            ) as logit_file:
+                logit_blocks = [
+                    logit_file.rows("vol_logit", vol_start, self.num_vol_queries)
+                ] + [
+                    logit_file.rows("near_logit", start, count)
+                    for start, count in near_blocks
+                ]
+            item["teacher_logits"] = np.concatenate(logit_blocks).astype(np.float32)
+
         if self.augment:
             surface, queries = axis_scaling(surface, queries, rng)
         return {
             "surface": surface.astype(np.float32),
             "queries": queries,
             "labels": labels,
+            **item,
         }

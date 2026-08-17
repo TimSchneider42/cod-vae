@@ -92,6 +92,26 @@ def main() -> None:
         default=16,
         help="how often the dataset is repeated per epoch (the reference uses 16)",
     )
+    parser.add_argument(
+        "--distill-dir",
+        type=Path,
+        help="directory tree mirroring ShapeNetV2_point with per-object npz files "
+        "('vol_logit'/'near_logit' rows aligned with the pool files) holding a teacher "
+        "model's precomputed logits; enables soft-target distillation",
+    )
+    parser.add_argument(
+        "--distill-weight",
+        type=float,
+        default=1.0,
+        help="weight of the soft-target occupancy loss (with --distill-dir)",
+    )
+    parser.add_argument(
+        "--distill-temperature",
+        type=float,
+        default=1.0,
+        help="temperature softening the teacher probabilities, "
+        "sigmoid(teacher_logits / T) (with --distill-dir)",
+    )
     parser.add_argument("--seed", type=int, default=123456)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument(
@@ -109,6 +129,8 @@ def main() -> None:
     args = parser.parse_args()
     if (args.resume or args.tf32) and args.backend != "torch":
         parser.error("--resume and --tf32 are only supported by the torch backend")
+    if args.distill_dir is not None and args.backend != "torch":
+        parser.error("--distill-dir is only supported by the torch backend")
 
     arch = _parse_arch(args.arch)
     if args.latent_dim is not None:
@@ -159,9 +181,15 @@ def main() -> None:
         batch_size=args.batch_size or (32 if args.stage == 1 else 128),
         accumulate_grad_batches=args.accumulate or (2 if args.stage == 1 else 1),
         seed=args.seed,
+        distill_coeff=args.distill_weight if args.distill_dir is not None else 0.0,
+        distill_temperature=args.distill_temperature,
     )
     dataset = ShapeNetVecSetDataset(
-        args.root_dir, split="train", repeat=args.repeat, seed=args.seed
+        args.root_dir,
+        split="train",
+        repeat=args.repeat,
+        seed=args.seed,
+        teacher_logit_dir=args.distill_dir,
     )
     print(
         f"Stage {args.stage} on {len(dataset)} samples/epoch "

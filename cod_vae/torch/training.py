@@ -53,11 +53,31 @@ class _LossModule(nn.Module):
         self.num_vol_queries = num_vol_queries
 
     def forward(
-        self, surface: torch.Tensor, queries: torch.Tensor, labels: torch.Tensor
+        self,
+        surface: torch.Tensor,
+        queries: torch.Tensor,
+        labels: torch.Tensor,
+        teacher_logits: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         if self.train_config.stage == 1:
-            return self._stage1(surface, queries, labels)
-        return self._stage2(surface, queries, labels)
+            outputs = self._stage1(surface, queries, labels)
+        else:
+            outputs = self._stage2(surface, queries, labels)
+        if self.train_config.distill_coeff and teacher_logits is not None:
+            cfg = self.train_config
+            # Soft-target distillation: the same occupancy BCE, but against the
+            # teacher's probabilities (optionally softened by the temperature) at the
+            # very same query points. BCE against soft targets is still a valid cross
+            # entropy, so the existing loss applies unchanged.
+            soft = torch.sigmoid(teacher_logits / cfg.distill_temperature)
+            distill_loss = _occupancy_loss(
+                outputs["logits"], soft, self.num_vol_queries,
+                cfg.vol_coeff, cfg.near_coeff,
+            )
+            outputs["loss"] = outputs["loss"] + cfg.distill_coeff * distill_loss
+            outputs["distill_loss"] = distill_loss.detach()
+        outputs.pop("logits", None)
+        return outputs
 
     def _stage1(self, surface, queries, labels):
         cfg = self.train_config
@@ -90,6 +110,7 @@ class _LossModule(nn.Module):
         )
         return {
             "loss": loss,
+            "logits": logits,
             "recon_loss": recon_loss.detach(),
             "init_loss": init_loss.detach(),
             "uncertainty_loss": uncertainty_loss.detach(),
@@ -126,6 +147,7 @@ class _LossModule(nn.Module):
         )
         return {
             "loss": loss,
+            "logits": logits,
             "feat_loss": feat_loss.detach(),
             "recon_loss": recon_loss.detach(),
             "kl_loss": kl_loss.detach(),
@@ -259,7 +281,12 @@ def train(
                 else model.no_sync()
             )
             with sync:
-                outputs = model(batch["surface"], batch["queries"], batch["labels"])
+                outputs = model(
+                    batch["surface"],
+                    batch["queries"],
+                    batch["labels"],
+                    teacher_logits=batch.get("teacher_logits"),
+                )
                 loss = outputs["loss"] / train_config.accumulate_grad_batches
                 loss.backward()
             if updating:

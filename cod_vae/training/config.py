@@ -49,6 +49,13 @@ class TrainingConfig:
     lr_milestones: tuple[int, ...] = (60, 70, 80, 90)
     lr_decay: float = 0.5
 
+    # Knowledge distillation (either stage): weight of an additional occupancy loss
+    # against a teacher model's soft targets, sigmoid(teacher_logits / temperature).
+    # Requires a dataset that serves "teacher_logits" alongside the hard labels; 0
+    # disables the term.
+    distill_coeff: float = 0.0
+    distill_temperature: float = 1.0
+
     log_every: int = 50
 
     def scaled_lr(self, num_devices: int) -> float:
