@@ -134,13 +134,14 @@ For pipelines where decoding speed matters — especially ones that backpropagat
 | [cod-vae-4x8-small](https://huggingface.co/TimSchneider42/cod-vae-4x8-small) | 0.733 (0.743) | 0.743 (0.758) |
 | [cod-vae-4x16-small](https://huggingface.co/TimSchneider42/cod-vae-4x16-small) | 0.794 (0.804) | 0.782 (0.797) |
 | [cod-vae-8x4-small](https://huggingface.co/TimSchneider42/cod-vae-8x4-small) | 0.724 (0.727) | 0.736 (0.748) |
+| [cod-vae-8x8-small](https://huggingface.co/TimSchneider42/cod-vae-8x8-small) | 0.792 (0.806) | 0.779 (0.793) |
 | [cod-vae-16x4-small](https://huggingface.co/TimSchneider42/cod-vae-16x4-small) | 0.762 (0.782) | 0.746 (0.770) |
 | [cod-vae-16x8-small](https://huggingface.co/TimSchneider42/cod-vae-16x8-small) | 0.842 (0.873) | 0.804 (0.835) |
 | [cod-vae-16x16-small](https://huggingface.co/TimSchneider42/cod-vae-16x16-small) | 0.872 (0.903) | 0.830 (0.863) |
 
 The ~8x speedup costs between 0.003 and 0.03 IoU, generally less at smaller latent budgets (0.03 at `16x16`, 0.009 at `4x16`, 0.003 at `8x4`).
 Each `-small` model has the same latent shape as its full-size counterpart — but a **different latent space**: latents from one cannot be decoded with the other.
-The remaining cells of the 8-latent row (`8x8`, `8x16`) are training and will be published the same way; see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-16xm-small-models-were-trained) for the architecture and exact training commands.
+The last cell of the grid (`8x16`) is training and will be published the same way; see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-16xm-small-models-were-trained) for the architecture and exact training commands.
 
 ## Training
 
