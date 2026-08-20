@@ -128,18 +128,21 @@ The corresponding MNIST3D figures are on each model card.
 
 For pipelines where decoding speed matters — especially ones that backpropagate through the frozen decoder — a `-small` variant of each model is published under the same name plus the `-small` suffix: ~39M parameters instead of 188M (decode path ~20M instead of 90M), roughly **8x faster forward+backward** (23.6k vs 2.9k shapes/s at batch 1024 x 2048 queries, H100, JAX float16), measured ~9x end-to-end in a downstream RL loop that trains through the decoder.
 
-| model | ABC volume IoU (full-size) | near-surface accuracy (full-size) |
-|---|---|---|
-| [cod-vae-4x4-small](https://huggingface.co/TimSchneider42/cod-vae-4x4-small) | 0.650 (0.671) | 0.698 (0.712) |
-| [cod-vae-4x8-small](https://huggingface.co/TimSchneider42/cod-vae-4x8-small) | 0.733 (0.743) | 0.743 (0.758) |
-| [cod-vae-4x16-small](https://huggingface.co/TimSchneider42/cod-vae-4x16-small) | 0.794 (0.804) | 0.782 (0.797) |
-| [cod-vae-8x4-small](https://huggingface.co/TimSchneider42/cod-vae-8x4-small) | 0.724 (0.727) | 0.736 (0.748) |
-| [cod-vae-8x8-small](https://huggingface.co/TimSchneider42/cod-vae-8x8-small) | 0.792 (0.806) | 0.779 (0.793) |
-| [cod-vae-16x4-small](https://huggingface.co/TimSchneider42/cod-vae-16x4-small) | 0.762 (0.782) | 0.746 (0.770) |
-| [cod-vae-16x8-small](https://huggingface.co/TimSchneider42/cod-vae-16x8-small) | 0.842 (0.873) | 0.804 (0.835) |
-| [cod-vae-16x16-small](https://huggingface.co/TimSchneider42/cod-vae-16x16-small) | 0.872 (0.903) | 0.830 (0.863) |
+| #latents \ latent-dim | 4 | 8 | 16 |
+|---|---|---|---|
+| **4** | [cod-vae-4x4-small](https://huggingface.co/TimSchneider42/cod-vae-4x4-small) | [cod-vae-4x8-small](https://huggingface.co/TimSchneider42/cod-vae-4x8-small) | [cod-vae-4x16-small](https://huggingface.co/TimSchneider42/cod-vae-4x16-small) |
+| **8** | [cod-vae-8x4-small](https://huggingface.co/TimSchneider42/cod-vae-8x4-small) | [cod-vae-8x8-small](https://huggingface.co/TimSchneider42/cod-vae-8x8-small) | *training* |
+| **16** | [cod-vae-16x4-small](https://huggingface.co/TimSchneider42/cod-vae-16x4-small) | [cod-vae-16x8-small](https://huggingface.co/TimSchneider42/cod-vae-16x8-small) | [cod-vae-16x16-small](https://huggingface.co/TimSchneider42/cod-vae-16x16-small) |
 
-The ~8x speedup costs between 0.003 and 0.03 IoU, generally less at smaller latent budgets (0.03 at `16x16`, 0.009 at `4x16`, 0.003 at `8x4`).
+Reconstruction quality on ABC, measured exactly as for the full-size grid above (**volume IoU / near-surface accuracy**, 128 held-out meshes):
+
+| **#latents** \ **latent-dim** | 4 | 8 | 16 |
+|---|---|---|---|
+| **4** | 0.650 / 0.698 | 0.733 / 0.743 | 0.794 / 0.782 |
+| **8** | 0.724 / 0.736 | 0.792 / 0.779 | — |
+| **16** | 0.762 / 0.746 | 0.842 / 0.804 | 0.872 / 0.830 |
+
+The ~8x speedup costs between 0.003 and 0.03 IoU against the full-size cell, generally less at smaller latent budgets (0.031 at `16x16`, 0.009 at `4x16`, 0.003 at `8x4`).
 Each `-small` model has the same latent shape as its full-size counterpart — but a **different latent space**: latents from one cannot be decoded with the other.
 The last cell of the grid (`8x16`) is training and will be published the same way; see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-16xm-small-models-were-trained) for the architecture and exact training commands.
 
