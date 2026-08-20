@@ -131,7 +131,7 @@ For pipelines where decoding speed matters — especially ones that backpropagat
 | #latents \ latent-dim | 4 | 8 | 16 |
 |---|---|---|---|
 | **4** | [cod-vae-4x4-small](https://huggingface.co/TimSchneider42/cod-vae-4x4-small) | [cod-vae-4x8-small](https://huggingface.co/TimSchneider42/cod-vae-4x8-small) | [cod-vae-4x16-small](https://huggingface.co/TimSchneider42/cod-vae-4x16-small) |
-| **8** | [cod-vae-8x4-small](https://huggingface.co/TimSchneider42/cod-vae-8x4-small) | [cod-vae-8x8-small](https://huggingface.co/TimSchneider42/cod-vae-8x8-small) | *training* |
+| **8** | [cod-vae-8x4-small](https://huggingface.co/TimSchneider42/cod-vae-8x4-small) | [cod-vae-8x8-small](https://huggingface.co/TimSchneider42/cod-vae-8x8-small) | [cod-vae-8x16-small](https://huggingface.co/TimSchneider42/cod-vae-8x16-small) |
 | **16** | [cod-vae-16x4-small](https://huggingface.co/TimSchneider42/cod-vae-16x4-small) | [cod-vae-16x8-small](https://huggingface.co/TimSchneider42/cod-vae-16x8-small) | [cod-vae-16x16-small](https://huggingface.co/TimSchneider42/cod-vae-16x16-small) |
 
 Reconstruction quality on ABC, measured exactly as for the full-size grid above (**volume IoU / near-surface accuracy**, 128 held-out meshes):
@@ -139,12 +139,12 @@ Reconstruction quality on ABC, measured exactly as for the full-size grid above 
 | **#latents** \ **latent-dim** | 4 | 8 | 16 |
 |---|---|---|---|
 | **4** | 0.650 / 0.698 | 0.733 / 0.743 | 0.794 / 0.782 |
-| **8** | 0.724 / 0.736 | 0.792 / 0.779 | — |
+| **8** | 0.724 / 0.736 | 0.792 / 0.779 | 0.837 / 0.808 |
 | **16** | 0.762 / 0.746 | 0.842 / 0.804 | 0.872 / 0.830 |
 
 The ~8x speedup costs between 0.003 and 0.03 IoU against the full-size cell, generally less at smaller latent budgets (0.031 at `16x16`, 0.009 at `4x16`, 0.003 at `8x4`).
 Each `-small` model has the same latent shape as its full-size counterpart — but a **different latent space**: latents from one cannot be decoded with the other.
-The last cell of the grid (`8x16`) is training and will be published the same way; see [TRAINING.md](TRAINING.md#how-the-published-cod-vae-16xm-small-models-were-trained) for the architecture and exact training commands.
+See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-16xm-small-models-were-trained) for the architecture and exact training commands.
 
 ## Training
 
