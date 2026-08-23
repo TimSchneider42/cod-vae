@@ -146,6 +146,27 @@ The ~8x speedup costs between 0.003 and 0.03 IoU against the full-size cell, gen
 Each `-small` model has the same latent shape as its full-size counterpart — but a **different latent space**: latents from one cannot be decoded with the other.
 See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-16xm-small-models-were-trained) for the architecture and exact training commands.
 
+#### Tiny models
+
+For pipelines whose wall clock is dominated by the decode forward+backward itself, a `-tiny` class pushes the same recipe further: width 128, a 2x2-block encoder with 256 patches, a 4-layer refinement decoder at 32-px patches, and 8-channel query planes — ~6.9M parameters, roughly **4x faster forward+backward than `-small`** (96–127k vs 23.6k shapes/s at batch 1024 x 2048 queries, H100, JAX float16). All tiny models share the `16x8` latent shape and were selected against a hard quality floor of 0.75 ABC volume IoU; the architecture is the axis:
+
+| architecture | model | distinguishing knob |
+|---|---|---|
+| **aggr** | [cod-vae-16x8-tiny-aggr](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny-aggr) | the base compound (quality pick) |
+| **res96** | [cod-vae-16x8-tiny-res96](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny-res96) | 96² query planes (speed pick, ~25% faster decode) |
+| **w64** | — not published | width 64: missed the quality floor |
+
+Reconstruction quality on ABC, measured exactly as for the grids above (**volume IoU / near-surface accuracy**, 128 held-out meshes):
+
+| architecture | ABC quality | decode step (batch 1024 x 2048 queries) |
+|---|---|---|
+| **aggr** | 0.769 / 0.752 | 10.6 ms (96k shapes/s) |
+| **res96** | 0.767 / 0.750 | 8.0 ms (127k shapes/s) |
+| **w64** | 0.723 / 0.723 | (below the 0.75 floor, not published) |
+
+Against `cod-vae-16x8-small` (0.842 / 0.804), the extra ~4x speedup costs ~0.07 IoU.
+Like the `-small` grid, each tiny model defines its **own latent space** despite the shared `16x8` latent shape.
+
 ## Training
 
 Both stages of the paper's recipe can be trained with this package, on either backend and on multiple GPUs, either directly on a directory of arbitrary (not necessarily watertight) meshes or on a dataset built ahead of time with `cod-vae-dataset`:
