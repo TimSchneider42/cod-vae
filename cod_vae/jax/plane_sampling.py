@@ -1,13 +1,16 @@
 """
 Custom backward for triplane bilinear sampling (Pallas/Triton).
 
-XLA's adjoint of the sampling gather is a scatter-add into the (C, H, W) plane
+XLA's adjoint of the sampling gather is a generic scatter-add into the plane
 gradients: for every query it issues C strided 4-byte atomic adds per texel corner,
 which dominates the decode-through-decoder training step at production batch sizes
-(~30 ms of an 86 ms step at batch 1024). The kernel here scatters into a
-channel-LAST (H, W, C) buffer instead, so each corner update is one contiguous
-C-vector of atomics, and the result is transposed to the model's (C, H, W) layout in
-a single dense pass that XLA fuses with the downstream patches-gradient permute.
+(~30 ms of an 86 ms step at batch 1024 in the original channel-first layout). The
+kernel here scatters into a channel-LAST (H, W, C) buffer instead, so each corner
+update is one contiguous C-vector of atomics. Since the model's JAX plane layout is
+itself channel-last (see :func:`cod_vae.jax.model._patches_to_planes`), the atomics'
+output order is final — no layout transpose runs after the scatter (the dense
+f32-to-model-dtype cast pass measured ~0.7 ms at batch 1024 on 128^2 planes before
+the layout change).
 
 :func:`sample_planes_sum` is numerically the same computation as the native
 sum-mode sampling loop in :mod:`cod_vae.jax.model` (align_corners=False, zero
@@ -103,7 +106,9 @@ def _scatter_plane_grads(
 ) -> jnp.ndarray:
     """
     Scatter query-feature cotangents (B, N, C) through the bilinear weights at
-    normalized coordinates (B, 3, N, 2) into plane gradients (B, 3, C, H, W).
+    normalized coordinates (B, 3, N, 2) into plane gradients (B, 3, H, W, C) — the
+    model's own channel-last layout, so the atomics' natural output order is final
+    and no layout transpose runs afterwards.
     """
     batch_size, num_axes, num_queries, _ = coords.shape
     channels = dfeat.shape[-1]
@@ -133,13 +138,13 @@ def _scatter_plane_grads(
         compiler_params=plt.CompilerParams(),
         interpret=_interpret,
     )(coords, dfeat, zeros)
-    return grads.transpose(0, 1, 4, 2, 3)
+    return grads
 
 
 @jax.custom_vjp
 def sample_planes_sum(planes: jnp.ndarray, queries: jnp.ndarray) -> jnp.ndarray:
     """
-    Sum-mode triplane sampling (planes (B, 3, C, H, W) in the model's compute dtype,
+    Sum-mode triplane sampling (planes (B, 3, H, W, C) in the model's compute dtype,
     queries (B, N, 3) float32 already clipped to the sampling range, float32 output)
     with the custom backward scatter.
     """
@@ -152,7 +157,7 @@ def _fwd(planes, queries):
 
 def _bwd(residuals, dfeat):
     planes, queries = residuals
-    height, width = planes.shape[-2:]
+    height, width = planes.shape[-3:-1]
     # queries[..., 0] indexes the width axis of each plane, [..., 1] the height axis;
     # the per-axis coordinate pairs mirror the native loop's queries[..., other_axes].
     coords = jnp.stack(

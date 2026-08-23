@@ -490,8 +490,12 @@ def _patches_to_planes(patches: jnp.ndarray, config: CODVAEConfig) -> jnp.ndarra
     patches = patches.reshape(
         batch_size, 3, resolution, resolution, patch_size, patch_size, config.query_dim
     )
-    return patches.transpose(0, 1, 6, 2, 4, 3, 5).reshape(
-        batch_size, 3, config.query_dim, config.decoder_output_resolution, -1
+    # Channel-LAST plane layout (B, 3, R, R, C): channels stay innermost from the
+    # decoder projection through the gather and the backward scatter, so the sampler
+    # reads/writes contiguous C-vectors and the scatter kernel's output needs no
+    # layout transpose (see cod_vae.jax.plane_sampling).
+    return patches.transpose(0, 1, 2, 4, 3, 5, 6).reshape(
+        batch_size, 3, config.decoder_output_resolution, -1, config.query_dim
     )
 
 
@@ -505,7 +509,7 @@ def decode_embed(
 ) -> tuple[jnp.ndarray, jnp.ndarray | None, jnp.ndarray | None]:
     """
     Decode latent embeddings (B, L, embed_dim) into triplane features: returns (planes,
-    init_planes, uncertainty_planes) of shapes (B, 3, query_dim, R, R) twice and
+    init_planes, uncertainty_planes) of shapes (B, 3, R, R, query_dim) twice and
     (B, 3, 1, plane_resolution, plane_resolution). With aux=False, the init/uncertainty
     planes (training-only) are not materialized and (planes, None, None) is returned.
     """
@@ -593,7 +597,7 @@ def decode_embed(
     )
     planes = _patches_to_planes(patches, config)
     resolution = config.plane_resolution
-    uncertainty_planes = uncertainty.reshape(batch_size, 3, 1, resolution, resolution)
+    uncertainty_planes = uncertainty.reshape(batch_size, 3, resolution, resolution, 1)
     return planes, _patches_to_planes(init_patches, config), uncertainty_planes
 
 
@@ -602,7 +606,9 @@ def decode_planes(
 ) -> jnp.ndarray:
     """
     Decode latents (B, num_latents, latent_dim) into triplane features
-    (B, 3, query_dim, output_resolution, output_resolution).
+    (B, 3, output_resolution, output_resolution, query_dim). The channel-last layout
+    differs from the torch backend's (B, 3, C, R, R); treat the result as an opaque
+    handle for :func:`decode_logits`.
     """
     z = decode_latents(params, latent, config=config)
     return decode_embed(params, z, config=config, aux=False)[0]
@@ -610,11 +616,13 @@ def decode_planes(
 
 def _grid_sample_plane(plane: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
     """
-    Bilinear sampling of a feature plane (C, H, W) at normalized coordinates (N, 2),
+    Bilinear sampling of a feature plane (H, W, C) at normalized coordinates (N, 2),
     where coords[:, 0] indexes the width and coords[:, 1] the height axis; matches
-    torch.nn.functional.grid_sample with zero padding and align_corners=False.
+    torch.nn.functional.grid_sample with zero padding and align_corners=False (the
+    torch backend stores planes channel-first; the JAX path is channel-last so each
+    query reads/writes one contiguous C-vector).
     """
-    channels, height, width = plane.shape
+    height, width, channels = plane.shape
     x = ((coords[:, 0] + 1.0) * width - 1.0) / 2.0
     y = ((coords[:, 1] + 1.0) * height - 1.0) / 2.0
     x0, y0 = jnp.floor(x), jnp.floor(y)
@@ -634,14 +642,14 @@ def _grid_sample_plane(plane: jnp.ndarray, coords: jnp.ndarray) -> jnp.ndarray:
     for xi, wx in weights_x:
         for yi, wy in weights_y:
             valid = (xi >= 0) & (xi < width) & (yi >= 0) & (yi < height)
-            values = plane[:, jnp.clip(yi, 0, height - 1), jnp.clip(xi, 0, width - 1)]
-            result = result + (wx * wy * valid)[:, None] * values.T
+            values = plane[jnp.clip(yi, 0, height - 1), jnp.clip(xi, 0, width - 1), :]
+            result = result + (wx * wy * valid)[:, None] * values
     return result
 
 
 def _sample_planes(planes: jnp.ndarray, queries: jnp.ndarray, mode: str) -> jnp.ndarray:
     """
-    Sample triplanes (B, 3, C, R, R) at queries (B, N, 3); sum or multiply planes.
+    Sample triplanes (B, 3, R, R, C) at queries (B, N, 3); sum or multiply planes.
 
     The interpolation always runs in float32, even for a half-precision model: the
     gradient with respect to the query coordinates is a difference of adjacent texels,
@@ -655,7 +663,7 @@ def _sample_planes(planes: jnp.ndarray, queries: jnp.ndarray, mode: str) -> jnp.
     COD_VAE_NO_PALLAS_SAMPLER=1 opts back into the native XLA adjoint).
     """
     queries = jnp.clip(queries.astype(jnp.float32), -1.0, 0.999)
-    num_channels = planes.shape[2]
+    num_channels = planes.shape[-1]
     if (
         mode == "sum"
         and jax.default_backend() == "gpu"
