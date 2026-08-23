@@ -18,15 +18,40 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-try:
-    from ._version import version as __version__
-except ImportError:  # not installed / no build metadata available
-    try:
-        from importlib.metadata import version as _package_version
+def _resolve_version() -> str:
+    # In a git checkout, describe the tree itself: the generated _version.py is
+    # install-time state, so after a pull (or on any PYTHONPATH import of a source
+    # tree) it reports the commit that was current when the package was last
+    # installed, not the code actually running.
+    root = Path(__file__).resolve().parent.parent
+    if (root / ".git").exists():
+        try:
+            import subprocess
 
-        __version__ = _package_version("cod-vae")
-    except Exception:
-        __version__ = "0.0.0"
+            described = subprocess.run(
+                ["git", "-C", str(root), "describe", "--tags", "--always", "--dirty"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if described.returncode == 0 and described.stdout.strip():
+                return described.stdout.strip()
+        except Exception:
+            pass
+    try:
+        from ._version import version
+
+        return version
+    except ImportError:  # not installed / no build metadata available
+        try:
+            from importlib.metadata import version as _package_version
+
+            return _package_version("cod-vae")
+        except Exception:
+            return "0.0.0"
+
+
+__version__ = _resolve_version()
 
 from .base import CODVAEBase
 from .checkpoint import Params, load_npz, load_torch_release, save_npz
