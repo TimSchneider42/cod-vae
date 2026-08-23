@@ -290,6 +290,39 @@ Published checkpoints additionally pin `attention_implementation="default"` in t
 
 The choices behind each knob were measured one ablation at a time (width 512/384/256/128, patches 8/16/32, decoder depth 4/6/8, latent decoder 4/6/12, encoder blocks, keep ratio 0.5–0.10, query_dim 32/16), each candidate judged by its own stage-2 IoU — stage-1 gaps repeatedly failed to predict stage-2 verdicts across architecture changes.
 
+## How the published cod-vae-NxM-tiny models were trained
+
+The `TimSchneider42/cod-vae-<num_latents>x<latent_dim>-tiny` models push the small recipe to the decode-throughput limit: ~6.9M parameters, ~5x faster forward+backward than `-small` (8.0 ms vs 43.5 ms at batch 1024 x 2048 queries, H100, JAX float16).
+The architecture was selected in a second ablation campaign under a hard floor of 0.75 held-out ABC IoU for the `16x8` configuration: relative to `-small` it halves the width again, shrinks the encoder to 2x2 blocks with 256 patches and mlp ratio 2, drops to 4 refinement-decoder layers at 32-px patches, halves the query-plane channels to 8, renders the query planes at 96² instead of 128², and halves the latent decoder to 6 layers.
+Candidates that traded more quality for speed (width 64: 0.723 ABC IoU) fell below the floor and were dropped; rendering the planes at 96² costs only ~0.002 IoU against the same compound at 128² while cutting the decode step ~25%.
+
+```bash
+TINY_ARCH="--arch embed_dim=128 --arch num_heads=4 \
+    --arch encoder_num_blocks=2 --arch encoder_num_layers_per_block=2 \
+    --arch encoder_num_patches=256 --arch encoder_mlp_ratio=2.0 \
+    --arch decoder_num_layers=4 --arch decoder_output_patch_size=32 \
+    --arch query_dim=8 --arch decoder_output_resolution=96"
+```
+
+Same merged dataset, same shape as the small grid — a 200-epoch stage-1 trunk per `num_latents`, shared by its row, then a fresh 100-epoch stage 2 per cell:
+
+```bash
+# Stage 1, once per num_latents (2 GPUs, effective batch 256, 200 epochs)
+torchrun --nproc_per_node=2 examples/train_shapenet.py data/merged runs/tiny-m16/stage1 \
+    --stage 1 --num-latents 16 --epochs 200 --batch-size 128 \
+    --repeat 8 --num-workers 10 --tf32 --resume $TINY_ARCH
+
+# Stage 2, one run per latent width (2 GPUs, effective batch 512, 100 epochs)
+for d in 4 8 16; do
+    torchrun --nproc_per_node=2 examples/train_shapenet.py data/merged runs/tiny-m16/stage2_d$d \
+        --stage 2 --init-from runs/tiny-m16/stage1/checkpoint_last.npz \
+        --latent-dim $d --epochs 100 --batch-size 256 \
+        --repeat 8 --num-workers 10 --tf32 --resume --arch num_latent_layers=6
+done
+```
+
+As with `-small`, the stage-1 `--arch` flags define the autoencoder and are inherited by stage 2 from the checkpoint; `num_latent_layers=6` belongs to stage 2. Everything else is the reference recipe, and published checkpoints pin `attention_implementation="default"` for the same reason as the small grid.
+
 ## Known differences from the reference training
 
 - **Precision**: the reference trains with 16-mixed precision; these trainers run in full float32. Expect roughly twice the per-step cost.
