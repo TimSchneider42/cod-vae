@@ -154,7 +154,7 @@ For pipelines whose wall clock is dominated by the decode forward+backward itsel
 |---|---|---|---|
 | **4** | *training* | *training* | *training* |
 | **8** | *training* | *training* | *training* |
-| **16** | *training* | [cod-vae-16x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny) | [cod-vae-16x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x16-tiny) |
+| **16** | [cod-vae-16x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x4-tiny) | [cod-vae-16x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny) | [cod-vae-16x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x16-tiny) |
 
 Reconstruction quality on ABC, measured exactly as for the grids above (**volume IoU / near-surface accuracy**, 128 held-out meshes):
 
@@ -162,7 +162,7 @@ Reconstruction quality on ABC, measured exactly as for the grids above (**volume
 |---|---|---|---|
 | **4** | — | — | — |
 | **8** | — | — | — |
-| **16** | — | 0.767 / 0.750 | 0.800 / 0.774 |
+| **16** | 0.685 / 0.707 | 0.767 / 0.750 | 0.800 / 0.774 |
 
 Against `cod-vae-16x8-small` (0.842 / 0.804), the extra speedup costs ~0.07 IoU at `16x8`.
 Like the `-small` grid, each `-tiny` model defines its **own latent space** despite the shared latent shape.
