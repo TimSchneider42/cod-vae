@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+
 def _resolve_version() -> str:
     # In a git checkout, describe the tree itself: the generated _version.py is
     # install-time state, so after a pull (or on any PYTHONPATH import of a source

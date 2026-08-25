@@ -71,8 +71,11 @@ class _LossModule(nn.Module):
             # entropy, so the existing loss applies unchanged.
             soft = torch.sigmoid(teacher_logits / cfg.distill_temperature)
             distill_loss = _occupancy_loss(
-                outputs["logits"], soft, self.num_vol_queries,
-                cfg.vol_coeff, cfg.near_coeff,
+                outputs["logits"],
+                soft,
+                self.num_vol_queries,
+                cfg.vol_coeff,
+                cfg.near_coeff,
             )
             outputs["loss"] = outputs["loss"] + cfg.distill_coeff * distill_loss
             outputs["distill_loss"] = distill_loss.detach()

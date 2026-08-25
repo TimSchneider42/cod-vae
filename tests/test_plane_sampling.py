@@ -126,7 +126,9 @@ def test_grid_sample_matches_torch_reference():
         mode="bilinear",
         padding_mode="zeros",
         align_corners=False,
-    )[0, :, 0].T.numpy()  # -> (N, C)
+    )[
+        0, :, 0
+    ].T.numpy()  # -> (N, C)
 
     out = _grid_sample_plane(
         jnp.asarray(np.moveaxis(plane_cf[0], 0, -1)),  # (H, W, C)
@@ -152,7 +154,11 @@ def test_patches_to_planes_matches_channel_first_formulation():
     rng = np.random.default_rng(6)
     patches = jnp.asarray(
         rng.standard_normal(
-            (2, 3 * resolution**2, config.decoder_output_patch_size**2 * config.query_dim)
+            (
+                2,
+                3 * resolution**2,
+                config.decoder_output_patch_size**2 * config.query_dim,
+            )
         ),
         jnp.float32,
     )
@@ -180,8 +186,10 @@ def test_fp16_planes_gradients_match_native():
     dp_native = jax.grad(loss(_native_sum))(planes, queries)
     assert dp_custom.dtype == jnp.float16
     np.testing.assert_allclose(
-        np.asarray(dp_custom, np.float32), np.asarray(dp_native, np.float32),
-        atol=2e-3, rtol=2e-2,
+        np.asarray(dp_custom, np.float32),
+        np.asarray(dp_native, np.float32),
+        atol=2e-3,
+        rtol=2e-2,
     )
 
 
