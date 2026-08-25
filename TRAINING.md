@@ -307,19 +307,21 @@ TINY_ARCH="--arch embed_dim=128 --arch num_heads=4 \
 Same merged dataset, same shape as the small grid — a 200-epoch stage-1 trunk per `num_latents`, shared by its row, then a fresh 100-epoch stage 2 per cell:
 
 ```bash
-# Stage 1, once per num_latents (2 GPUs, effective batch 256, 200 epochs)
-torchrun --nproc_per_node=2 examples/train_shapenet.py data/merged runs/tiny-m16/stage1 \
-    --stage 1 --num-latents 16 --epochs 200 --batch-size 128 \
+# Stage 1, once per num_latents (single GPU, effective batch 256, 200 epochs)
+torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-m16/stage1 \
+    --stage 1 --num-latents 16 --epochs 200 --batch-size 256 \
     --repeat 8 --num-workers 10 --tf32 --resume $TINY_ARCH
 
-# Stage 2, one run per latent width (2 GPUs, effective batch 512, 100 epochs)
+# Stage 2, one run per latent width (single GPU, effective batch 512, 100 epochs)
 for d in 4 8 16; do
-    torchrun --nproc_per_node=2 examples/train_shapenet.py data/merged runs/tiny-m16/stage2_d$d \
+    torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-m16/stage2_d$d \
         --stage 2 --init-from runs/tiny-m16/stage1/checkpoint_last.npz \
-        --latent-dim $d --epochs 100 --batch-size 256 \
+        --latent-dim $d --epochs 100 --batch-size 512 \
         --repeat 8 --num-workers 10 --tf32 --resume --arch num_latent_layers=6
 done
 ```
+
+The models are small enough that a single H100 carries these batches; on more GPUs, divide `--batch-size` by the GPU count — the LR schedule keys off the effective batch, so any split with the same product reproduces the recipe (the published `16x8` pair ran on 2 GPUs at half the per-GPU batch, the other rows on one).
 
 As with `-small`, the stage-1 `--arch` flags define the autoencoder and are inherited by stage 2 from the checkpoint; `num_latent_layers=6` belongs to stage 2. Everything else is the reference recipe, and published checkpoints pin `attention_implementation="default"` for the same reason as the small grid.
 
