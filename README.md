@@ -152,7 +152,7 @@ For pipelines whose wall clock is dominated by the decode forward+backward itsel
 
 | #latents \ latent-dim | 4 | 8 | 16 |
 |---|---|---|---|
-| **4** | *training* | *training* | *training* |
+| **4** | [cod-vae-4x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x4-tiny) | *training* | *training* |
 | **8** | [cod-vae-8x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x4-tiny) | *training* | *training* |
 | **16** | [cod-vae-16x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x4-tiny) | [cod-vae-16x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny) | [cod-vae-16x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x16-tiny) |
 
@@ -160,7 +160,7 @@ Reconstruction quality on ABC, measured exactly as for the grids above (**volume
 
 | **#latents** \ **latent-dim** | 4 | 8 | 16 |
 |---|---|---|---|
-| **4** | — | — | — |
+| **4** | 0.549 / 0.663 | — | — |
 | **8** | 0.649 / 0.694 | — | — |
 | **16** | 0.685 / 0.707 | 0.767 / 0.750 | 0.800 / 0.774 |
 
