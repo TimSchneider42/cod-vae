@@ -153,7 +153,7 @@ For pipelines whose wall clock is dominated by the decode forward+backward itsel
 | #latents \ latent-dim | 4 | 8 | 16 |
 |---|---|---|---|
 | **4** | [cod-vae-4x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x4-tiny) | [cod-vae-4x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x8-tiny) | [cod-vae-4x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x16-tiny) |
-| **8** | [cod-vae-8x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x4-tiny) | [cod-vae-8x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x8-tiny) | *training* |
+| **8** | [cod-vae-8x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x4-tiny) | [cod-vae-8x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x8-tiny) | [cod-vae-8x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x16-tiny) |
 | **16** | [cod-vae-16x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x4-tiny) | [cod-vae-16x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny) | [cod-vae-16x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x16-tiny) |
 
 Reconstruction quality on ABC, measured exactly as for the grids above (**volume IoU / near-surface accuracy**, 128 held-out meshes):
@@ -161,12 +161,12 @@ Reconstruction quality on ABC, measured exactly as for the grids above (**volume
 | **#latents** \ **latent-dim** | 4 | 8 | 16 |
 |---|---|---|---|
 | **4** | 0.549 / 0.663 | 0.667 / 0.710 | 0.727 / 0.738 |
-| **8** | 0.649 / 0.694 | 0.727 / 0.735 | — |
+| **8** | 0.649 / 0.694 | 0.727 / 0.735 | 0.766 / 0.755 |
 | **16** | 0.685 / 0.707 | 0.767 / 0.750 | 0.800 / 0.774 |
 
 Against `cod-vae-16x8-small` (0.842 / 0.804), the extra speedup costs ~0.07 IoU at `16x8`.
 Like the `-small` grid, each `-tiny` model defines its **own latent space** despite the shared latent shape.
-See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-tiny-models-were-trained) for the architecture and exact training commands. The remaining cells are training and publish as they finish.
+See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-tiny-models-were-trained) for the architecture and exact training commands. Quality tracks the total latent budget: `8x16` and `16x8` (128 floats each) land within 0.001 IoU of each other.
 
 ## Training
 
