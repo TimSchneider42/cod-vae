@@ -150,23 +150,27 @@ See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-16xm-small-models-were-t
 
 For pipelines whose wall clock is dominated by the decode forward+backward itself, a `-tiny` variant of each model pushes the recipe further: width 128, a 2x2-block encoder with 256 patches, a 4-layer refinement decoder at 32-px patches, and 8-channel query planes at 96² — ~6.9M parameters, roughly **5x faster forward+backward than `-small`** (127k vs 23.6k shapes/s at batch 1024 x 2048 queries, H100, JAX float16, 8.0 ms per step) and ~44x faster than the full-size models. The architecture was qualified on the `16x8` configuration against a hard quality floor of 0.75 ABC volume IoU before the grid was trained.
 
-| #latents \ latent-dim | 4 | 8 | 16 |
-|---|---|---|---|
-| **4** | [cod-vae-4x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x4-tiny) | [cod-vae-4x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x8-tiny) | [cod-vae-4x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x16-tiny) |
-| **8** | [cod-vae-8x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x4-tiny) | [cod-vae-8x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x8-tiny) | [cod-vae-8x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x16-tiny) |
-| **16** | [cod-vae-16x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x4-tiny) | [cod-vae-16x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny) | [cod-vae-16x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x16-tiny) |
+| #latents \ latent-dim | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|
+| **4** | [cod-vae-4x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x4-tiny) | [cod-vae-4x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x8-tiny) | [cod-vae-4x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x16-tiny) | *training* |
+| **8** | [cod-vae-8x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x4-tiny) | [cod-vae-8x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x8-tiny) | [cod-vae-8x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x16-tiny) | [cod-vae-8x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x32-tiny) |
+| **16** | [cod-vae-16x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x4-tiny) | [cod-vae-16x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny) | [cod-vae-16x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x16-tiny) | [cod-vae-16x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x32-tiny) |
+| **32** | *training* | *training* | *training* | *training* |
+| **64** | *training* | *training* | *training* | *training* |
 
 Reconstruction quality on ABC, measured exactly as for the grids above (**volume IoU / near-surface accuracy**, 128 held-out meshes):
 
-| **#latents** \ **latent-dim** | 4 | 8 | 16 |
-|---|---|---|---|
-| **4** | 0.549 / 0.663 | 0.667 / 0.710 | 0.727 / 0.738 |
-| **8** | 0.649 / 0.694 | 0.727 / 0.735 | 0.766 / 0.755 |
-| **16** | 0.685 / 0.707 | 0.767 / 0.750 | 0.800 / 0.774 |
+| **#latents** \ **latent-dim** | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|
+| **4** | 0.549 / 0.663 | 0.667 / 0.710 | 0.727 / 0.738 | — |
+| **8** | 0.649 / 0.694 | 0.727 / 0.735 | 0.766 / 0.755 | 0.788 / 0.769 |
+| **16** | 0.685 / 0.707 | 0.767 / 0.750 | 0.800 / 0.774 | 0.814 / 0.785 |
+| **32** | — | — | — | — |
+| **64** | — | — | — | — |
 
 Against `cod-vae-16x8-small` (0.842 / 0.804), the extra speedup costs ~0.07 IoU at `16x8`.
 Like the `-small` grid, each `-tiny` model defines its **own latent space** despite the shared latent shape.
-See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-tiny-models-were-trained) for the architecture and exact training commands. Quality tracks the total latent budget: `8x16` and `16x8` (128 floats each) land within 0.001 IoU of each other.
+See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-tiny-models-were-trained) for the architecture and exact training commands. Quality tracks the total latent budget: `8x16` and `16x8` (128 floats each) land within 0.001 IoU of each other. The `m 32/64` rows and `d 32` column are training and publish as they finish.
 
 ## Training
 
