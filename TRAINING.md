@@ -304,7 +304,7 @@ TINY_ARCH="--arch embed_dim=128 --arch num_heads=4 \
     --arch query_dim=8 --arch decoder_output_resolution=96"
 ```
 
-Same merged dataset, same shape as the small grid — a 200-epoch stage-1 trunk per `num_latents`, shared by its row, then a fresh 100-epoch stage 2 per cell:
+Same merged dataset and two-stage shape as the small grid — a 200-epoch stage-1 trunk per `num_latents`, shared by its row, then a fresh 100-epoch stage 2 per cell — but the `-tiny` grid spans the full-size footprint, `num_latents` {4, 8, 16, 32, 64} x `latent_dim` {4, 8, 16, 32}:
 
 ```bash
 # Stage 1, once per num_latents (single GPU, effective batch 256, 200 epochs)
@@ -313,7 +313,7 @@ torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-m16
     --repeat 8 --num-workers 10 --tf32 --resume $TINY_ARCH
 
 # Stage 2, one run per latent width (single GPU, effective batch 512, 100 epochs)
-for d in 4 8 16; do
+for d in 4 8 16 32; do
     torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-m16/stage2_d$d \
         --stage 2 --init-from runs/tiny-m16/stage1/checkpoint_last.npz \
         --latent-dim $d --epochs 100 --batch-size 512 \
