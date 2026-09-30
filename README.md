@@ -152,7 +152,7 @@ For pipelines whose wall clock is dominated by the decode forward+backward itsel
 
 | #latents \ latent-dim | 4 | 8 | 16 | 32 |
 |---|---|---|---|---|
-| **4** | [cod-vae-4x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x4-tiny) | [cod-vae-4x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x8-tiny) | [cod-vae-4x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x16-tiny) | *training* |
+| **4** | [cod-vae-4x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x4-tiny) | [cod-vae-4x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x8-tiny) | [cod-vae-4x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x16-tiny) | [cod-vae-4x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-4x32-tiny) |
 | **8** | [cod-vae-8x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x4-tiny) | [cod-vae-8x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x8-tiny) | [cod-vae-8x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x16-tiny) | [cod-vae-8x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x32-tiny) |
 | **16** | [cod-vae-16x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x4-tiny) | [cod-vae-16x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny) | [cod-vae-16x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x16-tiny) | [cod-vae-16x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x32-tiny) |
 | **32** | *training* | *training* | *training* | *training* |
@@ -162,7 +162,7 @@ Reconstruction quality on ABC, measured exactly as for the grids above (**volume
 
 | **#latents** \ **latent-dim** | 4 | 8 | 16 | 32 |
 |---|---|---|---|---|
-| **4** | 0.549 / 0.663 | 0.667 / 0.710 | 0.727 / 0.738 | — |
+| **4** | 0.549 / 0.663 | 0.667 / 0.710 | 0.727 / 0.738 | 0.763 / 0.757 |
 | **8** | 0.649 / 0.694 | 0.727 / 0.735 | 0.766 / 0.755 | 0.788 / 0.769 |
 | **16** | 0.685 / 0.707 | 0.767 / 0.750 | 0.800 / 0.774 | 0.814 / 0.785 |
 | **32** | — | — | — | — |
