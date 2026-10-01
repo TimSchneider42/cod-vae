@@ -59,13 +59,23 @@ def _lexsort_indices(points: torch.Tensor) -> torch.Tensor:
     return indices
 
 
-def _fps_loop(points: torch.Tensor, num_samples: int) -> torch.Tensor:
-    """The greedy FPS selection: point clouds (B, N, 3) -> indices (B, num_samples)."""
+def _fps_loop(
+    points: torch.Tensor, num_samples: int, farthest_start: bool = False
+) -> torch.Tensor:
+    """
+    The greedy FPS selection: point clouds (B, N, 3) -> indices (B, num_samples).
+    Starts from the first point, or with farthest_start from the point farthest from
+    the centroid, which makes the selection a function of the point set (independent
+    of point order) that rotates along with it.
+    """
     batch_size, num_points, _ = points.shape
     batch = torch.arange(batch_size, device=points.device)
     indices = points.new_zeros((batch_size, num_samples), dtype=torch.long)
     distances = points.new_full((batch_size, num_points), torch.inf)
-    last = points[:, 0]
+    if farthest_start:
+        offsets = points - points.mean(1, keepdim=True)
+        indices[:, 0] = (offsets * offsets).sum(-1).argmax(1)
+    last = points[batch, indices[:, 0]]
     for j in range(1, num_samples):
         delta = points - last[:, None]
         distances = torch.minimum(distances, (delta * delta).sum(-1))
@@ -79,22 +89,32 @@ def _fps_loop(points: torch.Tensor, num_samples: int) -> torch.Tensor:
 _fps_graphs: dict[tuple, tuple | None] = {}
 
 
-def _fps_indices(points: torch.Tensor, num_samples: int) -> torch.Tensor:
+def _fps_indices(
+    points: torch.Tensor, num_samples: int, farthest_start: bool = False
+) -> torch.Tensor:
     if not points.is_cuda or os.environ.get("COD_VAE_NO_FPS_GRAPH"):
-        return _fps_loop(points, num_samples)
-    key = (points.device.index, points.shape[0], points.shape[1], num_samples)
+        return _fps_loop(points, num_samples, farthest_start)
+    key = (
+        points.device.index,
+        points.shape[0],
+        points.shape[1],
+        num_samples,
+        farthest_start,
+    )
     entry = _fps_graphs.get(key)
     if entry is None and key not in _fps_graphs:
-        entry = _fps_graphs[key] = _fps_capture(points, num_samples)
+        entry = _fps_graphs[key] = _fps_capture(points, num_samples, farthest_start)
     if entry is None:
-        return _fps_loop(points, num_samples)
+        return _fps_loop(points, num_samples, farthest_start)
     graph, static_points, static_indices = entry
     static_points.copy_(points)
     graph.replay()
     return static_indices.clone()
 
 
-def _fps_capture(points: torch.Tensor, num_samples: int) -> tuple | None:
+def _fps_capture(
+    points: torch.Tensor, num_samples: int, farthest_start: bool
+) -> tuple | None:
     try:
         with torch.no_grad():
             static_points = points.clone()
@@ -102,12 +122,12 @@ def _fps_capture(points: torch.Tensor, num_samples: int) -> tuple | None:
             stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(stream):
                 for _ in range(2):
-                    _fps_loop(static_points, num_samples)
+                    _fps_loop(static_points, num_samples, farthest_start)
             torch.cuda.current_stream().wait_stream(stream)
             graph = torch.cuda.CUDAGraph()
             # thread_local keeps other threads (e.g. NCCL watchdogs) out of the capture
             with torch.cuda.graph(graph, capture_error_mode="thread_local"):
-                static_indices = _fps_loop(static_points, num_samples)
+                static_indices = _fps_loop(static_points, num_samples, farthest_start)
         return graph, static_points, static_indices
     except Exception:
         return None
@@ -394,7 +414,7 @@ class CODVAEModule(nn.Module):
         dim = config.embed_dim
         self.autoencoder = _Autoencoder(config)
         self.latent_proj_in = nn.Sequential(
-            nn.LayerNorm(dim), nn.Linear(dim, 2 * config.latent_dim)
+            nn.LayerNorm(dim), nn.Linear(dim, config.moments_dim)
         )
         self.latent_proj_out = nn.Sequential(
             nn.Linear(config.latent_dim, dim), nn.LayerNorm(dim)
@@ -408,7 +428,10 @@ class CODVAEModule(nn.Module):
         return self.autoencoder.encode_embed(pc)
 
     def encode_moments(self, z_embed: torch.Tensor) -> torch.Tensor:
-        """Posterior moments (B, L, 2 * latent_dim): mean and log-variance."""
+        """
+        Posterior moments (B, L, config.moments_dim): the mean (latent_dim channels)
+        followed by the log-variances (config.num_logvars channels).
+        """
         return self.latent_proj_in(z_embed.to(self.latent_proj_in[1].weight.dtype))
 
     def _attention_ctx(self):
@@ -582,10 +605,18 @@ class _Autoencoder(nn.Module):
         # Greedy FPS selections are prefix-stable, so one run yields both the latent
         # positions (first num_latents picks) and the encoder patch positions.
         config = self.config
-        indices = _fps_indices(pc, max(config.num_latents, config.encoder_num_patches))
+        equivariant = config.rotation_equivariant
+        indices = _fps_indices(
+            pc,
+            max(config.num_latents, config.encoder_num_patches),
+            farthest_start=equivariant,
+        )
 
         def take(count: int) -> torch.Tensor:
             sel = torch.gather(pc, 1, indices[:, :count, None].expand(-1, -1, 3))
+            if equivariant:
+                # FPS pick order: rotation-invariant, so slots never swap
+                return sel
             order = _lexsort_indices(sel)
             return torch.gather(sel, 1, order.unsqueeze(-1).expand(-1, -1, 3))
 

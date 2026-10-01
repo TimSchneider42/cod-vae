@@ -56,8 +56,31 @@ class TrainingConfig:
     distill_coeff: float = 0.0
     distill_temperature: float = 1.0
 
+    # Rotation equivariance (either stage, models with
+    # CODVAEConfig.rotation_equivariant): the dataset serves two rotated views per item
+    # (rotation_pair), and the loss gains eq_coeff times the relative equivariance error
+    # ||b - rho(R) a||^2 / mean(||a||^2, ||b||^2) of the two views' slots -- of the
+    # layer-normalized encoder embeddings in stage 1 (what stage 2 reads and matches),
+    # of the posterior means in stage 2. The coefficient ramps up linearly from
+    # eq_coeff / 10 over the first eq_warmup_epochs epochs. batch_size counts items,
+    # i.e. view pairs, so a step processes 2 * batch_size point clouds.
+    rotation_pairs: bool = False
+    eq_coeff: float = 1.0
+    eq_warmup_epochs: int = 10
+
     log_every: int = 50
 
     def scaled_lr(self, num_devices: int) -> float:
         effective = self.batch_size * num_devices * self.accumulate_grad_batches
+        if self.rotation_pairs:
+            effective *= 2  # two views per item
         return self.lr * effective / self.base_batch_size
+
+    def eq_weight(self, epoch: int) -> float:
+        """The equivariance loss coefficient at an epoch (linear warmup)."""
+        if not self.rotation_pairs:
+            return 0.0
+        if epoch >= self.eq_warmup_epochs:
+            return self.eq_coeff
+        start = 0.1 * self.eq_coeff
+        return start + (self.eq_coeff - start) * epoch / self.eq_warmup_epochs

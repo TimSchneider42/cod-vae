@@ -28,7 +28,7 @@ from ..training.data import MeshOccupancyDataset
 from .loss import occupancy_loss
 from .model import CODVAEModule
 
-__all__ = ["train"]
+__all__ = ["equivariance_loss", "expand_logvar", "rotate_groups", "train"]
 
 
 def _occupancy_loss(
@@ -39,6 +39,43 @@ def _occupancy_loss(
     near_coeff: float,
 ) -> torch.Tensor:
     return occupancy_loss(logits, labels, num_vol, vol_coeff, near_coeff).mean()
+
+
+def rotate_groups(x: torch.Tensor, rotation: torch.Tensor) -> torch.Tensor:
+    """
+    rho(R) for rotation-equivariant features: x (B, L, C) is read as C / 4 groups
+    [x, y, z, s]; each group's 3-vector is rotated by rotation (B, 3, 3), its scalar is
+    left alone.
+    """
+    groups = x.unflatten(-1, (x.shape[-1] // 4, 4))
+    vectors = torch.einsum("bij,blgj->blgi", rotation.to(x.dtype), groups[..., :3])
+    return torch.cat([vectors, groups[..., 3:]], dim=-1).flatten(-2)
+
+
+def equivariance_loss(
+    a: torch.Tensor, b: torch.Tensor, rotation: torch.Tensor
+) -> torch.Tensor:
+    """
+    Relative equivariance error of two views' features (B, L, C), b being the view
+    rotated by rotation (B, 3, 3) relative to a: ||b - rho(R) a||^2 over the features'
+    mean squared norm. Scale-free, so shrinking the features cannot lower it.
+    """
+    error = (b - rotate_groups(a, rotation)).pow(2).mean()
+    return error / (0.5 * (a.pow(2).mean() + b.pow(2).mean()) + 1e-8)
+
+
+def expand_logvar(config: CODVAEConfig, logvar: torch.Tensor) -> torch.Tensor:
+    """
+    Per-channel log-variances (..., latent_dim) from the posterior's num_logvars: for
+    rotation-equivariant models, each group's [vector, scalar] pair becomes
+    [vector, vector, vector, scalar] (an isotropic distribution of every 3-vector).
+    """
+    if not config.rotation_equivariant:
+        return logvar
+    pairs = logvar.unflatten(-1, (logvar.shape[-1] // 2, 2))
+    return torch.cat(
+        [pairs[..., :1].expand(*pairs.shape[:-1], 3), pairs[..., 1:]], -1
+    ).flatten(-2)
 
 
 class _LossModule(nn.Module):
@@ -58,11 +95,15 @@ class _LossModule(nn.Module):
         queries: torch.Tensor,
         labels: torch.Tensor,
         teacher_logits: torch.Tensor | None = None,
+        rotation: torch.Tensor | None = None,
+        eq_weight: float = 0.0,
     ) -> dict[str, torch.Tensor]:
+        # With rotation pairs, the batch holds the two views of each object next to
+        # each other (view a at even, view b at odd indices) and rotation is R_ab.
         if self.train_config.stage == 1:
-            outputs = self._stage1(surface, queries, labels)
+            outputs = self._stage1(surface, queries, labels, rotation, eq_weight)
         else:
-            outputs = self._stage2(surface, queries, labels)
+            outputs = self._stage2(surface, queries, labels, rotation, eq_weight)
         if self.train_config.distill_coeff and teacher_logits is not None:
             cfg = self.train_config
             # Soft-target distillation: the same occupancy BCE, but against the
@@ -82,7 +123,15 @@ class _LossModule(nn.Module):
         outputs.pop("logits", None)
         return outputs
 
-    def _stage1(self, surface, queries, labels):
+    def _equivariance(self, outputs, features, rotation, eq_weight):
+        if rotation is None:
+            return outputs
+        eq_loss = equivariance_loss(features[0::2], features[1::2], rotation)
+        outputs["loss"] = outputs["loss"] + eq_weight * eq_loss
+        outputs["eq_loss"] = eq_loss.detach()
+        return outputs
+
+    def _stage1(self, surface, queries, labels, rotation=None, eq_weight=0.0):
         cfg = self.train_config
         z = self.module.encode_embed(surface)
         planes, init_planes, uncertainty_planes = self.module.decode_embed(z)
@@ -111,21 +160,27 @@ class _LossModule(nn.Module):
             + cfg.init_coeff * init_loss
             + cfg.uncertainty_coeff * uncertainty_loss
         )
-        return {
+        outputs = {
             "loss": loss,
             "logits": logits,
             "recon_loss": recon_loss.detach(),
             "init_loss": init_loss.detach(),
             "uncertainty_loss": uncertainty_loss.detach(),
         }
+        # The layer-normalized embedding is what stage 2 reads (latent_proj_in) and
+        # reconstructs (the feature matching target), so that is what must rotate.
+        normalized = F.layer_norm(z.float(), z.shape[-1:])
+        return self._equivariance(outputs, normalized, rotation, eq_weight)
 
-    def _stage2(self, surface, queries, labels):
+    def _stage2(self, surface, queries, labels, rotation=None, eq_weight=0.0):
         cfg = self.train_config
         with torch.no_grad():
             z_enc = self.module.encode_embed(surface)
 
         moments = self.module.encode_moments(z_enc)
-        mean, logvar = torch.chunk(moments, 2, dim=-1)
+        latent_dim = self.module.config.latent_dim
+        mean = moments[..., :latent_dim]
+        logvar = expand_logvar(self.module.config, moments[..., latent_dim:])
         logvar = torch.clamp(logvar, -30.0, 20.0)
         std = torch.exp(0.5 * logvar)
         z = mean + std * torch.randn_like(std)
@@ -148,13 +203,14 @@ class _LossModule(nn.Module):
             + cfg.recon_coeff * recon_loss
             + cfg.kl_coeff * kl_loss
         )
-        return {
+        outputs = {
             "loss": loss,
             "logits": logits,
             "feat_loss": feat_loss.detach(),
             "recon_loss": recon_loss.detach(),
             "kl_loss": kl_loss.detach(),
         }
+        return self._equivariance(outputs, mean.float(), rotation, eq_weight)
 
 
 def _set_trainable(module: CODVAEModule, stage: int) -> None:
@@ -184,6 +240,16 @@ def train(
     what an interrupted run (job time limit, node failure) needs. Runs under torchrun
     for multi-GPU data parallelism.
     """
+    if train_config.rotation_pairs != config.rotation_equivariant:
+        raise ValueError(
+            "rotation pairs (TrainingConfig.rotation_pairs) are used exactly for "
+            "rotation-equivariant models (CODVAEConfig.rotation_equivariant)"
+        )
+    if getattr(dataset, "rotation_pairs", False) != train_config.rotation_pairs:
+        raise ValueError(
+            "the dataset must serve rotation pairs exactly when "
+            "TrainingConfig.rotation_pairs is set"
+        )
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if device is None:
         if torch.cuda.is_available():
@@ -272,8 +338,13 @@ def train(
         dataset.set_epoch(epoch)
         if sampler is not None:
             sampler.set_epoch(epoch)
+        eq_weight = train_config.eq_weight(epoch)
         for step, batch in enumerate(loader):
             batch = {key: value.to(device) for key, value in batch.items()}
+            rotation = batch.pop("rotation", None)
+            if rotation is not None:
+                # (B, 2, ...) view pairs -> (2B, ...), the two views side by side
+                batch = {key: value.flatten(0, 1) for key, value in batch.items()}
             updating = (step + 1) % train_config.accumulate_grad_batches == 0
             # Gradients of the micro-batches in between are only accumulated locally;
             # all-reducing them too would move the same 750 MB twice per update for a
@@ -289,6 +360,8 @@ def train(
                     batch["queries"],
                     batch["labels"],
                     teacher_logits=batch.get("teacher_logits"),
+                    rotation=rotation,
+                    eq_weight=eq_weight,
                 )
                 loss = outputs["loss"] / train_config.accumulate_grad_batches
                 loss.backward()

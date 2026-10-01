@@ -169,7 +169,7 @@ def init_params(config: CODVAEConfig, seed: int = 0) -> Params:
 
     ## latent VAE modules (stage 2)
     init.layer_norm("latent_proj_in.0")
-    init.linear("latent_proj_in.1", 2 * config.latent_dim, dim)
+    init.linear("latent_proj_in.1", config.moments_dim, dim)
     init.linear("latent_proj_out.0", dim, config.latent_dim)
     init.layer_norm("latent_proj_out.1")
     for layer in range(config.num_latent_layers):

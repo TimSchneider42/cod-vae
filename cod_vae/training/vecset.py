@@ -33,7 +33,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .data import axis_scaling
+from .data import axis_scaling, rotation_pair
 
 __all__ = ["ShapeNetVecSetDataset"]
 
@@ -141,6 +141,9 @@ class ShapeNetVecSetDataset:
         near_groups: int = 2,
         io_retry_seconds: float = 240.0,
         teacher_logit_dir: Path | str | None = None,
+        rotation_pairs: bool = False,
+        small_rotation_fraction: float = 0.5,
+        small_rotation_max_degrees: float = 30.0,
     ):
         self.root_dir = Path(root_dir)
         self.point_dir = self.root_dir / "ShapeNetV2_point"
@@ -165,6 +168,10 @@ class ShapeNetVecSetDataset:
         # block out of each group to keep the mix of noise levels.
         self.near_groups = near_groups
         self.io_retry_seconds = io_retry_seconds
+        # Serve every item as two rotated views of one object (see rotation_pair).
+        self.rotation_pairs = rotation_pairs
+        self.small_rotation_fraction = small_rotation_fraction
+        self.small_rotation_max_degrees = small_rotation_max_degrees
         self.epoch = 0
         self._scales: dict[tuple[str, str], float] = {}
 
@@ -310,9 +317,17 @@ class ShapeNetVecSetDataset:
 
         if self.augment:
             surface, queries = axis_scaling(surface, queries, rng)
-        return {
+        item = {
             "surface": surface.astype(np.float32),
             "queries": queries,
             "labels": labels,
             **item,
         }
+        if self.rotation_pairs:
+            item = rotation_pair(
+                item,
+                rng,
+                self.small_rotation_fraction,
+                self.small_rotation_max_degrees,
+            )
+        return item

@@ -20,6 +20,7 @@ __all__ = [
     "pack_cube_transform",
     "unpack_cube_transform",
     "normalize_to_cube",
+    "points_to_sphere_transform",
     "sample_surface_points",
     "grid_queries",
     "occupancy_grid_to_mesh",
@@ -99,17 +100,44 @@ def unpack_cube_transform(
     )
 
 
+def points_to_sphere_transform(
+    points: np.ndarray, object_scale: float = 0.9, center: np.ndarray | None = None
+) -> CubeTransform:
+    """
+    The rotation-equivariant counterpart of :func:`points_to_cube_transform`, used by
+    rotation-equivariant models: centered on ``center`` (default: the points' mean)
+    and scaled so the farthest point lies at distance object_scale. Unlike the
+    bounding box, centroid and radius rotate along with the geometry, so the object
+    keeps its size and position in the cube at every orientation.
+    """
+    if center is None:
+        center = points.mean(axis=0)
+    radius = np.sqrt(((points - center) ** 2).sum(axis=-1).max())
+    return CubeTransform(center=np.asarray(center), scale=float(object_scale / radius))
+
+
 def normalize_to_cube(
-    mesh: trimesh.Trimesh, object_scale: float = 0.9
+    mesh: trimesh.Trimesh, object_scale: float = 0.9, sphere: bool = False
 ) -> tuple[trimesh.Trimesh, CubeTransform]:
     """
     Scale/translate a mesh into the model's [-1, 1] cube such that its largest extent
-    spans [-object_scale, object_scale]. Returns the normalized mesh and the transform
-    (whose inverse maps decoded geometry back into the original frame).
+    spans [-object_scale, object_scale] -- or with sphere=True (rotation-equivariant
+    models, see :func:`points_to_sphere_transform`) such that it fits the ball of
+    radius object_scale around its surface centroid. Returns the normalized mesh and
+    the transform (whose inverse maps decoded geometry back into the original frame).
     """
-    # mesh.bounds (as opposed to mesh.vertices) ignores unreferenced vertices; its two
-    # corners are a valid point set with the same bounding box.
-    transform = points_to_cube_transform(mesh.bounds, object_scale)
+    if sphere:
+        # The area-weighted surface centroid: what the training data's surface point
+        # samples average to (see cod_vae.training.data.rotation_pair). The triangle
+        # corners, unlike mesh.vertices, skip unreferenced vertices.
+        weights = mesh.area_faces / mesh.area_faces.sum()
+        center = (mesh.triangles_center * weights[:, None]).sum(axis=0)
+        corners = mesh.triangles.reshape(-1, 3)
+        transform = points_to_sphere_transform(corners, object_scale, center)
+    else:
+        # mesh.bounds (as opposed to mesh.vertices) ignores unreferenced vertices; its
+        # two corners are a valid point set with the same bounding box.
+        transform = points_to_cube_transform(mesh.bounds, object_scale)
     normalized = mesh.copy()
     normalized.apply_translation(-transform.center)
     normalized.apply_scale(transform.scale)

@@ -57,6 +57,38 @@ class CODVAEConfig:
     # can actually use it and falls back otherwise, logging which it chose.
     attention_implementation: AttentionImplementation = "auto"
 
+    # Rotation-equivariant latents. Every latent vector (and every encoder embedding)
+    # is read as consecutive groups of four channels, [x, y, z, s]: a 3-vector that
+    # rotates with the input plus a rotation-invariant scalar. Training (see
+    # TrainingConfig.eq_coeff) then asks z(R x) = rho(R) z(x), rho applying R to every
+    # 3-vector. It also makes the encoder a function of the point set, so slot j means
+    # the same thing at every orientation: farthest point sampling starts at the point
+    # farthest from the centroid instead of the first point, and the latent slots keep
+    # the FPS pick order instead of a lexicographic sort of world coordinates, which
+    # swaps slots whenever two of them cross under rotation. latent_dim and embed_dim
+    # must be multiples of 4, and the posterior has one log-variance per group member
+    # kind -- one shared by the three vector channels (an isotropic distribution, so
+    # sampling commutes with rotation) and one for the scalar.
+    rotation_equivariant: bool = False
+
+    def __post_init__(self):
+        if self.rotation_equivariant and (self.latent_dim % 4 or self.embed_dim % 4):
+            raise ValueError(
+                "rotation_equivariant needs latent_dim and embed_dim to be multiples "
+                f"of 4 (one 3-vector + one scalar per group), got latent_dim="
+                f"{self.latent_dim}, embed_dim={self.embed_dim}"
+            )
+
+    @property
+    def num_logvars(self) -> int:
+        """Log-variances of the posterior per latent vector."""
+        return self.latent_dim // 2 if self.rotation_equivariant else self.latent_dim
+
+    @property
+    def moments_dim(self) -> int:
+        """Width of the posterior moments: latent_dim means plus the log-variances."""
+        return self.latent_dim + self.num_logvars
+
     @property
     def plane_resolution(self) -> int:
         return self.decoder_output_resolution // self.decoder_output_patch_size

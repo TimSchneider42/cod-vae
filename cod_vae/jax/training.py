@@ -186,6 +186,11 @@ def train(
     checkpoint ("checkpoint_epoch_*.npz" and "checkpoint_last.npz") is written after
     every epoch. Training is data-parallel across all (or the given) local devices.
     """
+    if config.rotation_equivariant:
+        raise NotImplementedError(
+            "rotation-equivariant training (rotation pairs and the equivariance loss) "
+            "is implemented by the torch backend only"
+        )
     if devices is None:
         devices = jax.devices()
     mesh = Mesh(np.array(devices), ("data",))

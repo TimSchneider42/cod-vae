@@ -280,8 +280,14 @@ def _point_embed(params, points: jnp.ndarray) -> jnp.ndarray:
     return _linear(params, "autoencoder.point_embed.mlp", features)
 
 
-def _fps_indices(points: jnp.ndarray, num_samples: int) -> jnp.ndarray:
-    """The greedy FPS selection: unbatched point cloud (N, 3) -> indices (num_samples,)."""
+def _fps_indices(
+    points: jnp.ndarray, num_samples: int, farthest_start: bool = False
+) -> jnp.ndarray:
+    """
+    The greedy FPS selection: unbatched point cloud (N, 3) -> indices (num_samples,).
+    Starts from the first point, or with farthest_start from the point farthest from
+    the centroid (a function of the point set that rotates along with it).
+    """
 
     def body(j, state):
         indices, distances = state
@@ -290,6 +296,9 @@ def _fps_indices(points: jnp.ndarray, num_samples: int) -> jnp.ndarray:
         return indices.at[j].set(jnp.argmax(distances)), distances
 
     indices = jnp.zeros(num_samples, dtype=jnp.int32)
+    if farthest_start:
+        offsets = points - points.mean(0)
+        indices = indices.at[0].set(jnp.argmax(jnp.sum(offsets * offsets, axis=-1)))
     distances = jnp.full(points.shape[0], jnp.inf, dtype=points.dtype)
     indices, _ = jax.lax.fori_loop(1, num_samples, body, (indices, distances))
     return indices
@@ -326,10 +335,14 @@ def encode_embed(
         partial(
             _fps_indices,
             num_samples=max(config.num_latents, config.encoder_num_patches),
+            farthest_start=config.rotation_equivariant,
         )
     )(points)
 
     def take(selected):
+        if config.rotation_equivariant:
+            # FPS pick order: rotation-invariant, so slots never swap
+            return selected
         return selected[jnp.lexsort(selected.T[::-1])]
 
     z = jax.vmap(take)(
@@ -406,7 +419,10 @@ def encode_embed(
 def encode_moments(
     params: Mapping[str, jnp.ndarray], z_embed: jnp.ndarray
 ) -> jnp.ndarray:
-    """Posterior moments (B, L, 2 * latent_dim): mean and log-variance."""
+    """
+    Posterior moments (B, L, config.moments_dim): the mean (latent_dim channels)
+    followed by the log-variances (config.num_logvars channels).
+    """
     return _linear(
         params, "latent_proj_in.1", _layer_norm(params, "latent_proj_in.0", z_embed)
     )

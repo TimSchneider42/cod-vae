@@ -9,6 +9,8 @@ from .data import (
     MeshOccupancyDataset,
     axis_scaling,
     iterate_batches,
+    random_rotation,
+    rotation_pair,
 )
 from .preprocess import (
     SdfGenSettings,
@@ -26,4 +28,6 @@ __all__ = [
     "build_vecset_dataset",
     "iterate_batches",
     "preprocess_mesh",
+    "random_rotation",
+    "rotation_pair",
 ]

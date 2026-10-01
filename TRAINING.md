@@ -196,6 +196,30 @@ vae.push_to_hub("you/cod-vae-m32")  # weights you trained yourself are yours to 
 
 A quick qualitative check: encode and decode a few validation shapes (`ShapeNetVecSetDataset(root_dir, split="val")` provides surface points and labeled queries, so occupancy accuracy/IoU can be computed by comparing `vae.decode(latents, queries) > 0` against the labels).
 
+## 8. Rotation-equivariant latents
+
+`--arch rotation_equivariant=1` trains a model whose latent rotates along with the object, for consumers that track it, say, across frames. Every latent vector (and every encoder embedding) is read as groups of four channels `[x, y, z, s]`: a 3-vector that should rotate with the input and a scalar that should not, so `latent_dim` (and `embed_dim`) must be multiples of 4. Training asks `z(R x) = rho(R) z(x)`, `rho(R)` rotating each group's 3-vector by `R`. The architecture is unchanged; the property is learned:
+
+- **Rotation pairs.** Each training item becomes two views of one object, centered on its surface centroid and scaled into the unit ball (the bounding box is not rotation-invariant), turned by a random `R_a` and by `R_b = R_ab R_a`, `R_ab` being a small rotation (up to 30°) half of the time and uniform otherwise. `--batch-size` then counts view pairs, so a step processes twice as many point clouds; halving `--batch-size` and `--repeat` keeps the compute per step and per epoch of a regular run (the LR scaling counts views).
+- **Equivariance loss.** `eq_coeff * ||b - rho(R_ab) a||^2 / mean(||a||^2, ||b||^2)` over the slots of the two views, ramped up from a tenth over the first 10 epochs (`--eq-weight`, `--eq-warmup-epochs`). Stage 1 applies it to the layer-normalized encoder embeddings, which is what stage 2 reads and reconstructs; stage 2 applies it to the posterior means. Both stages are needed: stage 2 freezes the encoder, so it can only keep a property stage 1 established.
+- **Isotropic posterior.** Each group has two log-variances, one shared by the three vector channels and one for the scalar, so the posterior noise is spherical and sampling commutes with rotation (`latent_proj_in` emits `latent_dim + latent_dim / 2` moments). The N(0, I) prior is rotation-invariant, so the KL term needs no change.
+- **Slot correspondence.** Farthest point sampling starts at the point farthest from the centroid instead of the first input point, and the slots keep the FPS pick order instead of a lexicographic sort of world coordinates, which swaps slots whenever two of them cross under rotation. Slot `j` therefore means the same thing at every orientation, and the latent no longer depends on the order of the input points.
+
+```bash
+# Stage 1 (single GPU: 128 pairs = 256 point clouds per step, same as the tiny recipe)
+torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-eq-m16/stage1 \
+    --stage 1 --num-latents 16 --epochs 200 --batch-size 128 \
+    --repeat 4 --num-workers 10 --tf32 --resume $TINY_ARCH --arch rotation_equivariant=1
+
+# Stage 2 (inherits rotation_equivariant from the checkpoint)
+torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-eq-m16/stage2_d8 \
+    --stage 2 --init-from runs/tiny-eq-m16/stage1/checkpoint_last.npz \
+    --latent-dim 8 --epochs 100 --batch-size 256 \
+    --repeat 4 --num-workers 10 --tf32 --resume --arch num_latent_layers=6
+```
+
+`encode_mesh` normalizes such models with the same centroid-plus-ball convention (`normalize_to_cube(..., sphere=True)`); feed `encode` point clouds normalized that way. Only the torch trainer implements the rotation pairs; both backends run the resulting models.
+
 ## How the published cod-vae-NxM models were trained
 
 The `TimSchneider42/cod-vae-<num_latents>x<latent_dim>` models on the Hugging Face Hub (see the README) were produced with the commands below.
