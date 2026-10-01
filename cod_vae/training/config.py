@@ -58,10 +58,11 @@ class TrainingConfig:
 
     # Rotation equivariance (either stage, models with
     # CODVAEConfig.rotation_equivariant): the dataset serves two rotated views per item
-    # (rotation_pair), and the loss gains eq_coeff times the relative equivariance error
-    # ||b - rho(R) a||^2 / mean(||a||^2, ||b||^2) of the two views' slots -- of the
-    # layer-normalized encoder embeddings in stage 1 (what stage 2 reads and matches),
-    # of the posterior means in stage 2. The coefficient ramps up linearly from
+    # (rotation_pair), and the loss gains eq_coeff times the equivariance error of the
+    # two views' slots (torch.training.equivariance_loss: the vectors' ||b - R a||^2
+    # relative to their own energy plus the scalars' (b - a)^2 relative to their
+    # variance) -- of the layer-normalized encoder embeddings in stage 1 (what stage 2
+    # reads and matches), of the posterior means in stage 2. The coefficient ramps up linearly from
     # eq_coeff / 10 over the first eq_warmup_epochs epochs. batch_size counts items,
     # i.e. view pairs, so a step processes 2 * batch_size point clouds.
     rotation_pairs: bool = False

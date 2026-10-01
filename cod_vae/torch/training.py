@@ -56,12 +56,25 @@ def equivariance_loss(
     a: torch.Tensor, b: torch.Tensor, rotation: torch.Tensor
 ) -> torch.Tensor:
     """
-    Relative equivariance error of two views' features (B, L, C), b being the view
-    rotated by rotation (B, 3, 3) relative to a: ||b - rho(R) a||^2 over the features'
-    mean squared norm. Scale-free, so shrinking the features cannot lower it.
+    Equivariance error of two views' features (B, L, C), b being the view rotated by
+    rotation (B, 3, 3) relative to a: the vector channels' ||b - R a||^2 relative to
+    their own mean squared norm, plus the scalar channels' (b - a)^2 relative to their
+    variance over the batch. Each part is normalized by its own channels, so neither
+    kind can escape the loss by shrinking (a loss normalized over all channels
+    together is minimized by collapsing the vectors and keeping everything in the
+    scalars), nor the scalars by riding on a large constant offset.
     """
-    error = (b - rotate_groups(a, rotation)).pow(2).mean()
-    return error / (0.5 * (a.pow(2).mean() + b.pow(2).mean()) + 1e-8)
+    ga = a.unflatten(-1, (a.shape[-1] // 4, 4))
+    gb = b.unflatten(-1, (b.shape[-1] // 4, 4))
+    va, vb = ga[..., :3], gb[..., :3]
+    rotated = torch.einsum("bij,blgj->blgi", rotation.to(a.dtype), va)
+    vector_energy = 0.5 * (va.pow(2).sum(-1).mean() + vb.pow(2).sum(-1).mean())
+    vector_error = (vb - rotated).pow(2).sum(-1).mean() / (vector_energy + 1e-8)
+    sa, sb = ga[..., 3], gb[..., 3]
+    scalars = torch.cat([sa, sb]).flatten(0, 1)  # (2 B L, groups)
+    scalar_variance = scalars.var(0, unbiased=False).mean()
+    scalar_error = (sb - sa).pow(2).mean() / (scalar_variance + 1e-8)
+    return vector_error + scalar_error
 
 
 def expand_logvar(config: CODVAEConfig, logvar: torch.Tensor) -> torch.Tensor:

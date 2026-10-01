@@ -221,3 +221,24 @@ def test_equivariant_training_step(stage, eq_config, pair_dataset, capsys):
     frozen = latent_keys if stage == 1 else set(params) - latent_keys
     assert changed and not (changed & frozen)
     assert all(np.isfinite(result[k]).all() for k in result)
+
+
+def test_equivariance_loss_cannot_be_escaped():
+    """
+    Neither shrinking the vector channels nor a constant scalar offset may lower the
+    loss: each channel kind is measured relative to itself.
+    """
+    rng = np.random.default_rng(4)
+    rotation = torch.from_numpy(random_rotation(rng)).float()[None].expand(4, 3, 3)
+    a, b = torch.randn(4, 3, 8), torch.randn(4, 3, 8)
+    loss = float(equivariance_loss(a, b, rotation))
+    shrink = torch.ones(8)
+    shrink[[0, 1, 2, 4, 5, 6]] = 0.01
+    assert float(equivariance_loss(a * shrink, b * shrink, rotation)) == pytest.approx(
+        loss, rel=1e-4
+    )
+    offset = torch.zeros(8)
+    offset[[3, 7]] = 100.0
+    assert float(equivariance_loss(a + offset, b + offset, rotation)) == pytest.approx(
+        loss, rel=1e-4
+    )
