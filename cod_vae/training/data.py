@@ -26,6 +26,7 @@ from .preprocess import SdfGenSettings, preprocess_mesh
 
 __all__ = [
     "axis_scaling",
+    "isotropic_scaling",
     "MeshOccupancyDataset",
     "iterate_batches",
     "random_rotation",
@@ -56,6 +57,31 @@ def axis_scaling(
         )
         surface = np.clip(surface, -1.0, 1.0)
     return surface, queries
+
+
+def isotropic_scaling(
+    surface: np.ndarray,
+    queries: np.ndarray,
+    rng: np.random.Generator,
+    jitter: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.float32]:
+    """
+    :func:`axis_scaling` with one random factor for all three axes, for signed distance
+    targets: a similarity transform scales every distance by the same factor (returned
+    third), whereas an anisotropic stretch does not preserve distances at all.
+    """
+    factor = np.float32(rng.random() * 0.5 + 0.75)
+    surface = surface * factor
+    queries = queries * factor
+    scale = np.float32(0.999999 / max(np.abs(surface).max(), 0.1))
+    surface = surface * scale
+    queries = queries * scale
+    if jitter:
+        surface = surface + 0.005 * rng.standard_normal(surface.shape).astype(
+            np.float32
+        )
+        surface = np.clip(surface, -1.0, 1.0)
+    return surface, queries, factor * scale
 
 
 def _axis_angle(axis: np.ndarray, angle: float) -> np.ndarray:

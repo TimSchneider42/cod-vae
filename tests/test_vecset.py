@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -143,3 +145,85 @@ def test_vecset_dataset_trains_with_distillation(vecset_root, tiny_config, stage
     )
     params = train(tiny_config, train_config, dataset, device="cpu")
     assert all(np.isfinite(value).all() for value in params.values())
+
+
+def _write_sdf(vecset_root, skip=()):
+    """Sidecar distances encoding each row's label in their sign: |sdf| = 0.01 + row/1e4."""
+    for category in ("02691156", "03001627"):
+        sdf_dir = vecset_root / "sdf" / category
+        sdf_dir.mkdir(parents=True)
+        for path in (vecset_root / "ShapeNetV2_point" / category).glob("*.npz"):
+            if (category, path.stem) in skip:
+                continue
+            pool = np.load(path)
+            out = {}
+            for kind in ("vol", "near"):
+                magnitude = 0.01 + np.arange(len(pool[f"{kind}_label"])) / 1e4
+                sign = np.where(pool[f"{kind}_label"] > 0.5, -1.0, 1.0)
+                out[f"{kind}_sdf"] = (sign * magnitude).astype(np.float16)
+            np.savez(sdf_dir / path.name, **out)
+
+
+def test_vecset_sdf(vecset_root):
+    """Distances are read at the labels' offsets, scale with the (now isotropic)
+    augmentation, and objects without a distance file are left out."""
+    _write_sdf(vecset_root, skip={("03001627", "obj1")})
+    kwargs = dict(split="train", pc_size=128, num_vol_queries=64, num_near_queries=64)
+    plain = ShapeNetVecSetDataset(vecset_root, augment=False, **kwargs)
+    sdf = ShapeNetVecSetDataset(
+        vecset_root, augment=False, sdf_dir=vecset_root / "sdf", **kwargs
+    )
+    assert len(sdf) == 3
+    for index in range(3):
+        item = sdf[index]
+        assert item["sdf"].shape == (128,) and item["sdf"].dtype == np.float32
+        np.testing.assert_array_equal(item["sdf"] < 0, item["labels"] > 0.5)
+        reference = plain[plain.items.index(sdf.items[index])]
+        np.testing.assert_array_equal(item["queries"], reference["queries"])
+
+    augmented = ShapeNetVecSetDataset(
+        vecset_root, sdf_dir=vecset_root / "sdf", **kwargs
+    )
+    item, raw = augmented[0], sdf[0]
+    # One factor for every axis and every distance.
+    ratio = item["queries"] / raw["queries"]
+    factor = np.median(ratio)
+    np.testing.assert_allclose(ratio, factor, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(item["sdf"], raw["sdf"] * factor, rtol=1e-5)
+
+
+@pytest.mark.parametrize("stage", (1, 2))
+def test_vecset_dataset_trains_with_sdf(vecset_root, tiny_config, stage):
+    pytest.importorskip("torch")
+    from cod_vae.torch.training import train
+
+    _write_sdf(vecset_root)
+    kwargs = dict(split="train", pc_size=128, num_vol_queries=64, num_near_queries=64)
+    dataset = ShapeNetVecSetDataset(vecset_root, sdf_dir=vecset_root / "sdf", **kwargs)
+    train_config = TrainingConfig(
+        stage=stage, epochs=1, batch_size=2, log_every=1000, sdf_truncation=0.1
+    )
+    params = train(tiny_config, train_config, dataset, device="cpu")
+    assert all(np.isfinite(value).all() for value in params.values())
+
+    # Targets and dataset must agree.
+    with pytest.raises(ValueError, match="sdf_truncation"):
+        train(
+            tiny_config,
+            replace(train_config, sdf_truncation=0.0),
+            dataset,
+            device="cpu",
+        )
+
+
+def test_sdf_loss():
+    torch = pytest.importorskip("torch")
+    from cod_vae.torch import sdf_loss
+
+    sdf = torch.tensor([[-0.5, -0.05, 0.0, 0.05, 0.5]])
+    # The target is the negated distance in units of the truncation, clamped to +-1.
+    target = torch.tensor([[1.0, 0.5, 0.0, -0.5, -1.0]])
+    exact = sdf_loss(target, sdf, num_vol=3, truncation=0.1, near_coeff=1.0)
+    np.testing.assert_allclose(float(exact), 0.0, atol=1e-6)
+    loss = sdf_loss(target + 0.2, sdf, num_vol=2, truncation=0.1, near_coeff=0.5)
+    np.testing.assert_allclose(float(loss), 0.2 + 0.5 * 0.2, rtol=1e-6)

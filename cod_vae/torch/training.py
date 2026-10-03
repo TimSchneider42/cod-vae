@@ -25,7 +25,7 @@ from ..config import CODVAEConfig
 from ..init import LATENT_PREFIXES, init_params
 from ..training.config import TrainingConfig
 from ..training.data import MeshOccupancyDataset
-from .loss import occupancy_loss
+from .loss import occupancy_loss, sdf_loss, sdf_target
 from .model import CODVAEModule
 
 __all__ = ["equivariance_loss", "expand_logvar", "rotate_groups", "train"]
@@ -110,9 +110,15 @@ class _LossModule(nn.Module):
         teacher_logits: torch.Tensor | None = None,
         rotation: torch.Tensor | None = None,
         eq_weight: float = 0.0,
+        sdf: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         # With rotation pairs, the batch holds the two views of each object next to
         # each other (view a at even, view b at odd indices) and rotation is R_ab.
+        if self.train_config.sdf_truncation > 0:
+            if sdf is None:
+                raise ValueError("sdf_truncation is set, but the batch has no sdf")
+            # The regression target takes the labels' place throughout.
+            labels = sdf
         if self.train_config.stage == 1:
             outputs = self._stage1(surface, queries, labels, rotation, eq_weight)
         else:
@@ -136,6 +142,22 @@ class _LossModule(nn.Module):
         outputs.pop("logits", None)
         return outputs
 
+    def _recon_loss(self, logits, targets):
+        """Per-batch reconstruction loss against labels, or distances with sdf targets."""
+        cfg = self.train_config
+        if cfg.sdf_truncation > 0:
+            return sdf_loss(
+                logits,
+                targets,
+                self.num_vol_queries,
+                cfg.sdf_truncation,
+                cfg.vol_coeff,
+                cfg.near_coeff,
+            ).mean()
+        return _occupancy_loss(
+            logits, targets, self.num_vol_queries, cfg.vol_coeff, cfg.near_coeff
+        )
+
     def _equivariance(self, outputs, features, rotation, eq_weight):
         if rotation is None:
             return outputs
@@ -151,20 +173,19 @@ class _LossModule(nn.Module):
         logits = self.module.decode_logits(planes, queries)
         init_logits = self.module.decode_logits(init_planes, queries)
 
-        recon_loss = _occupancy_loss(
-            logits, labels, self.num_vol_queries, cfg.vol_coeff, cfg.near_coeff
-        )
-        init_loss = _occupancy_loss(
-            init_logits, labels, self.num_vol_queries, cfg.vol_coeff, cfg.near_coeff
-        )
+        recon_loss = self._recon_loss(logits, labels)
+        init_loss = self._recon_loss(init_logits, labels)
 
         # The uncertainty head learns to predict the (normalized) error of the initial
         # occupancy prediction at each query point.
         uncertainty = self.module.decode_uncertainty(uncertainty_planes, queries)
         start, end = cfg.uncertainty_range
-        query_loss = F.binary_cross_entropy_with_logits(
-            init_logits, labels, reduction="none"
-        )
+        if cfg.sdf_truncation > 0:
+            query_loss = (init_logits - sdf_target(labels, cfg.sdf_truncation)).abs()
+        else:
+            query_loss = F.binary_cross_entropy_with_logits(
+                init_logits, labels, reduction="none"
+            )
         target = ((query_loss - start).clamp(0, end - start) / (end - start)).detach()
         uncertainty_loss = F.mse_loss(uncertainty, target)
 
@@ -204,9 +225,7 @@ class _LossModule(nn.Module):
 
         planes = self.module.decode_embed(z_recon, aux=False)[0]
         logits = self.module.decode_logits(planes, queries)
-        recon_loss = _occupancy_loss(
-            logits, labels, self.num_vol_queries, cfg.vol_coeff, cfg.near_coeff
-        )
+        recon_loss = self._recon_loss(logits, labels)
 
         var = torch.exp(logvar)
         kl_loss = 0.5 * torch.mean(mean**2 + var - 1.0 - logvar)
@@ -263,6 +282,15 @@ def train(
             "the dataset must serve rotation pairs exactly when "
             "TrainingConfig.rotation_pairs is set"
         )
+    if (train_config.sdf_truncation > 0) != (
+        getattr(dataset, "sdf_dir", None) is not None
+    ):
+        raise ValueError(
+            "signed distance targets (TrainingConfig.sdf_truncation) need a dataset "
+            "serving them (sdf_dir), and a dataset serving them needs sdf_truncation"
+        )
+    if train_config.sdf_truncation > 0 and train_config.distill_coeff:
+        raise ValueError("distillation targets are occupancy logits, not distances")
     distributed = int(os.environ.get("WORLD_SIZE", "1")) > 1
     if device is None:
         if torch.cuda.is_available():
@@ -375,6 +403,7 @@ def train(
                     teacher_logits=batch.get("teacher_logits"),
                     rotation=rotation,
                     eq_weight=eq_weight,
+                    sdf=batch.get("sdf"),
                 )
                 loss = outputs["loss"] / train_config.accumulate_grad_batches
                 loss.backward()

@@ -220,6 +220,25 @@ torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-eq-
 
 `encode_mesh` normalizes such models with the same centroid-plus-ball convention (`normalize_to_cube(..., sphere=True)`); feed `encode` point clouds normalized that way. Only the torch trainer implements the rotation pairs; both backends run the resulting models.
 
+## 9. Signed distance targets
+
+Occupancy labels flip wholesale under small displacements of thin geometry: shift a 1 mm plate by 1 mm and every label inside it changes. A signed distance moves by at most the displacement, so training on distances asks for a decoder (and, through it, a latent) that changes smoothly with the shape. `--sdf-dir` switches the reconstruction loss to truncated signed distances:
+
+- **Target.** The decoder's output regresses `clamp(-sdf / t, -1, 1)` with an L1 loss (`cod_vae.torch.sdf_loss`; `t` = `--sdf-truncation`, default 0.1 in the normalized frame, where objects span [-0.9, 0.9]). The sign is flipped so the output is positive inside, like an occupancy logit: the zero level set, `logits > 0` metrics and meshing apply unchanged. The volume / near-surface weights are the occupancy loss's, and the uncertainty head learns the initial prediction's L1 error instead of its BCE.
+- **Data.** A tree mirroring `ShapeNetV2_point`, `<category>/<object_id>.npz` with `vol_sdf` and `near_sdf` (negative inside) row-aligned with the pool files' `vol_points` / `near_points`. Pool files that carry those arrays themselves serve as their own distance files (link the category in). Objects without a distance file are left out.
+- **Augmentation.** The anisotropic AxisScaling does not preserve distances, so with distance targets the scaling is isotropic (one random factor in [0.75, 1.25]), and the served distances are scaled by the same factor as the points.
+
+The distances must be computed against the same watertight mesh the occupancy labels came from, at the stored (float16) query points, so their signs reproduce the labels; the `cod-vae-dataset` pipeline's mesh is reproducible from each object's seed. Rotation pairs and distillation do not combine with distance targets.
+
+```bash
+torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged-sdf runs/tiny-sdf-m16/stage1 \
+    --stage 1 --num-latents 16 --epochs 200 --batch-size 256 --accumulate 1 \
+    --repeat 8 --num-workers 10 --tf32 --resume $TINY_ARCH \
+    --sdf-dir data/merged-sdf-distances --sdf-truncation 0.1
+```
+
+Stage 2 takes the same two flags.
+
 ## How the published cod-vae-NxM models were trained
 
 The `TimSchneider42/cod-vae-<num_latents>x<latent_dim>` models on the Hugging Face Hub (see the README) were produced with the commands below.

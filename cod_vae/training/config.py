@@ -69,6 +69,14 @@ class TrainingConfig:
     eq_coeff: float = 1.0
     eq_warmup_epochs: int = 10
 
+    # Signed distance targets (either stage): with sdf_truncation > 0 the decoder
+    # output regresses the truncated signed distance instead of an occupancy logit --
+    # L1 against clamp(-sdf / sdf_truncation, -1, 1) (torch.loss.sdf_loss), positive
+    # inside like a logit, so metrics and meshing at the zero level are unchanged. The
+    # dataset must serve "sdf" (ShapeNetVecSetDataset(sdf_dir=...)). The uncertainty
+    # head then learns the initial prediction's L1 error instead of its BCE.
+    sdf_truncation: float = 0.0
+
     log_every: int = 50
 
     def scaled_lr(self, num_devices: int) -> float:

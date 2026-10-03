@@ -117,6 +117,20 @@ def main() -> None:
         "sigmoid(teacher_logits / T) (with --distill-dir)",
     )
     parser.add_argument(
+        "--sdf-dir",
+        type=Path,
+        help="directory tree mirroring ShapeNetV2_point with per-object npz files "
+        "('vol_sdf'/'near_sdf' rows aligned with the pool files) holding signed "
+        "distances; trains on truncated signed distances instead of occupancy "
+        "(torch backend)",
+    )
+    parser.add_argument(
+        "--sdf-truncation",
+        type=float,
+        default=0.1,
+        help="distance at which the signed distance targets saturate (with --sdf-dir)",
+    )
+    parser.add_argument(
         "--eq-weight",
         type=float,
         default=1.0,
@@ -161,6 +175,8 @@ def main() -> None:
         parser.error("--resume and --tf32 are only supported by the torch backend")
     if args.distill_dir is not None and args.backend != "torch":
         parser.error("--distill-dir is only supported by the torch backend")
+    if args.sdf_dir is not None and args.backend != "torch":
+        parser.error("--sdf-dir is only supported by the torch backend")
 
     arch = _parse_arch(args.arch)
     if args.latent_dim is not None:
@@ -216,6 +232,7 @@ def main() -> None:
         rotation_pairs=config.rotation_equivariant,
         eq_coeff=args.eq_weight,
         eq_warmup_epochs=args.eq_warmup_epochs,
+        sdf_truncation=args.sdf_truncation if args.sdf_dir is not None else 0.0,
     )
     dataset = ShapeNetVecSetDataset(
         args.root_dir,
@@ -226,6 +243,7 @@ def main() -> None:
         rotation_pairs=config.rotation_equivariant,
         small_rotation_fraction=args.small_rotation_fraction,
         small_rotation_max_degrees=args.small_rotation_max_degrees,
+        sdf_dir=args.sdf_dir,
     )
     print(
         f"Stage {args.stage} on {len(dataset)} samples/epoch "

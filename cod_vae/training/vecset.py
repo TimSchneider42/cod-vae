@@ -24,6 +24,7 @@ training IO-bound only on pathologically slow storage.
 from __future__ import annotations
 
 import ast
+import os
 import struct
 import sys
 import time
@@ -33,7 +34,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .data import axis_scaling, rotation_pair
+from .data import axis_scaling, isotropic_scaling, rotation_pair
 
 __all__ = ["ShapeNetVecSetDataset"]
 
@@ -144,6 +145,7 @@ class ShapeNetVecSetDataset:
         rotation_pairs: bool = False,
         small_rotation_fraction: float = 0.5,
         small_rotation_max_degrees: float = 30.0,
+        sdf_dir: Path | str | None = None,
     ):
         self.root_dir = Path(root_dir)
         self.point_dir = self.root_dir / "ShapeNetV2_point"
@@ -172,6 +174,16 @@ class ShapeNetVecSetDataset:
         self.rotation_pairs = rotation_pairs
         self.small_rotation_fraction = small_rotation_fraction
         self.small_rotation_max_degrees = small_rotation_max_degrees
+        # A directory tree mirroring ShapeNetV2_point ({category}/{object_id}.npz with
+        # "vol_sdf" and "near_sdf" rows aligned with the pool files; a category may
+        # also point at pool files that carry them) makes every item also carry "sdf",
+        # the signed distance (negative inside) at the very query points served. Only
+        # objects with such a file are served, and the augmentation becomes isotropic
+        # (an anisotropic stretch does not preserve distances); the distances scale
+        # with it.
+        self.sdf_dir = Path(sdf_dir) if sdf_dir is not None else None
+        if self.sdf_dir is not None and rotation_pairs:
+            raise NotImplementedError("rotation pairs do not rescale signed distances")
         self.epoch = 0
         self._scales: dict[tuple[str, str], float] = {}
 
@@ -186,6 +198,14 @@ class ShapeNetVecSetDataset:
                 object_ids = [
                     line.replace(".npz", "").strip() for line in f if line.strip()
                 ]
+            if self.sdf_dir is not None:
+                # One directory listing instead of an existence check per object.
+                available = {
+                    name.removesuffix(".npz")
+                    for name in os.listdir(self.sdf_dir / category)
+                    if name.endswith(".npz") and not name.endswith(".tmp.npz")
+                }
+                object_ids = [i for i in object_ids if i in available]
             self.items.extend((category, object_id) for object_id in object_ids)
         if not self.items:
             raise ValueError(f"No objects found for split {split!r} in {self.root_dir}")
@@ -299,6 +319,17 @@ class ShapeNetVecSetDataset:
                         queries_file.rows("near_label", near_start, count),
                     )
                 )
+        if self.sdf_dir is not None:
+            with _PoolFile(self.sdf_dir / category / f"{object_id}.npz") as sdf_file:
+                sdf_blocks = [
+                    sdf_file.rows("vol_sdf", vol_start, self.num_vol_queries)
+                ] + [
+                    sdf_file.rows("near_sdf", start, count)
+                    for start, count in near_blocks
+                ]
+            # The surface is served in the frame scaled by the .npy factor; the
+            # distances were computed in the pool (query) frame, which it leaves alone.
+            sdf = np.concatenate(sdf_blocks).astype(np.float32)
         queries = np.concatenate([points for points, _ in blocks]).astype(np.float32)
         labels = np.concatenate([label for _, label in blocks]).astype(np.float32)
 
@@ -315,8 +346,13 @@ class ShapeNetVecSetDataset:
                 ]
             item["teacher_logits"] = np.concatenate(logit_blocks).astype(np.float32)
 
-        if self.augment:
+        if self.augment and self.sdf_dir is not None:
+            surface, queries, factor = isotropic_scaling(surface, queries, rng)
+            sdf = sdf * factor
+        elif self.augment:
             surface, queries = axis_scaling(surface, queries, rng)
+        if self.sdf_dir is not None:
+            item["sdf"] = sdf
         item = {
             "surface": surface.astype(np.float32),
             "queries": queries,
