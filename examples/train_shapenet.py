@@ -125,6 +125,12 @@ def main() -> None:
         "(torch backend)",
     )
     parser.add_argument(
+        "--layout-index",
+        type=Path,
+        help="file written by cod_vae.training.write_layout_index for this dataset: "
+        "pool file layouts read once instead of once per loader worker and epoch",
+    )
+    parser.add_argument(
         "--sdf-truncation",
         type=float,
         default=0.1,
@@ -244,6 +250,7 @@ def main() -> None:
         small_rotation_fraction=args.small_rotation_fraction,
         small_rotation_max_degrees=args.small_rotation_max_degrees,
         sdf_dir=args.sdf_dir,
+        layout_index=args.layout_index,
     )
     print(
         f"Stage {args.stage} on {len(dataset)} samples/epoch "

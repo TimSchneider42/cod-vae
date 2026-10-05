@@ -227,3 +227,31 @@ def test_sdf_loss():
     np.testing.assert_allclose(float(exact), 0.0, atol=1e-6)
     loss = sdf_loss(target + 0.2, sdf, num_vol=2, truncation=0.1, near_coeff=0.5)
     np.testing.assert_allclose(float(loss), 0.2 + 0.5 * 0.2, rtol=1e-6)
+
+
+def test_vecset_layout_index(vecset_root, tmp_path):
+    """Items served through a precomputed layout index are identical, and no file
+    layout is parsed while serving them."""
+    from cod_vae.training import write_layout_index
+    from cod_vae.training import vecset as vecset_module
+
+    _write_sdf(vecset_root)
+    kwargs = dict(split="train", pc_size=128, num_vol_queries=64, num_near_queries=64)
+    plain = ShapeNetVecSetDataset(vecset_root, sdf_dir=vecset_root / "sdf", **kwargs)
+    reference = [plain[i] for i in range(len(plain))]
+
+    index_path = tmp_path / "layouts.pkl"
+    write_layout_index(plain, index_path, processes=2)
+    vecset_module._PoolFile._layouts.clear()
+    indexed = ShapeNetVecSetDataset(
+        vecset_root, sdf_dir=vecset_root / "sdf", layout_index=index_path, **kwargs
+    )
+    try:
+        for i, expected in enumerate(reference):
+            item = indexed[i]
+            for key in expected:
+                np.testing.assert_array_equal(item[key], expected[key])
+        assert not vecset_module._PoolFile._layouts
+        assert len(indexed._scales) == 4
+    finally:
+        vecset_module._PoolFile._index = {}

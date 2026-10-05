@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import os
+import pickle
 import struct
 import sys
 import time
@@ -36,7 +37,7 @@ import numpy as np
 
 from .data import axis_scaling, isotropic_scaling, rotation_pair
 
-__all__ = ["ShapeNetVecSetDataset"]
+__all__ = ["ShapeNetVecSetDataset", "write_layout_index"]
 
 
 class _PoolFile:
@@ -55,10 +56,20 @@ class _PoolFile:
     # is a round trip.
     _layouts: dict[Path, dict[str, tuple[int, np.dtype, tuple[int, ...]]] | None] = {}
     _layout_limit = 200_000
+    # Layouts read ahead of time (write_layout_index), installed by the dataset. A
+    # DataLoader starts fresh worker processes every epoch, each with an empty
+    # _layouts, so with many workers nearly every read is a worker's first look at its
+    # file -- parsing the zip directory and array headers costs more round trips than
+    # the rows themselves. An index installed before the workers fork is never missed.
+    _index: dict[Path, dict[str, tuple[int, np.dtype, tuple[int, ...]]] | None] = {}
 
     def __init__(self, path: Path | str):
         self.path = Path(path)
         self._handle = None
+        indexed = self._index.get(self.path, False)
+        if indexed is not False:
+            self.members = indexed
+            return
         if self.path not in self._layouts:
             if len(self._layouts) >= self._layout_limit:
                 self._layouts.clear()
@@ -146,6 +157,7 @@ class ShapeNetVecSetDataset:
         small_rotation_fraction: float = 0.5,
         small_rotation_max_degrees: float = 30.0,
         sdf_dir: Path | str | None = None,
+        layout_index: Path | str | None = None,
     ):
         self.root_dir = Path(root_dir)
         self.point_dir = self.root_dir / "ShapeNetV2_point"
@@ -186,6 +198,17 @@ class ShapeNetVecSetDataset:
             raise NotImplementedError("rotation pairs do not rescale signed distances")
         self.epoch = 0
         self._scales: dict[tuple[str, str], float] = {}
+        # A file written by write_layout_index for this dataset: every pool file's
+        # layout and every object's surface scale, read once instead of once per worker
+        # and epoch. Entries are keyed by path; files it does not cover are read as
+        # usual.
+        self._layout_index: dict = {}
+        if layout_index is not None:
+            with open(layout_index, "rb") as f:
+                index = pickle.load(f)
+            self._layout_index = index["layouts"]
+            self._scales.update(index["scales"])
+            _PoolFile._index = self._layout_index
 
         if categories is None:
             categories = sorted(
@@ -270,6 +293,8 @@ class ShapeNetVecSetDataset:
                 delay = min(delay * 2, 30.0)
 
     def _load(self, index: int) -> dict[str, np.ndarray]:
+        if self._layout_index and _PoolFile._index is not self._layout_index:
+            _PoolFile._index = self._layout_index  # workers started by spawn
         category, object_id = self.items[index % len(self.items)]
         rng = np.random.default_rng((self.seed, self.epoch, index))
 
@@ -367,3 +392,49 @@ class ShapeNetVecSetDataset:
                 self.small_rotation_max_degrees,
             )
         return item
+
+
+def _index_object(args) -> tuple[tuple[str, str], float, list]:
+    (point_dir, surface_dir, extra_dirs), (category, object_id) = args
+    scale = float(np.load(point_dir / category / f"{object_id}.npy"))
+    files = [
+        point_dir / category / f"{object_id}.npz",
+        surface_dir / category / "4_pointcloud" / f"{object_id}.npz",
+    ] + [directory / category / f"{object_id}.npz" for directory in extra_dirs]
+    layouts = []
+    for path in files:
+        reader = _PoolFile.__new__(_PoolFile)
+        reader.path, reader._handle = path, None
+        try:
+            layouts.append((path, reader._read_layout()))
+        finally:
+            reader.close()
+    return (category, object_id), scale, layouts
+
+
+def write_layout_index(
+    dataset: ShapeNetVecSetDataset, path: Path | str, processes: int = 16
+) -> None:
+    """
+    Read the layout of every file ``dataset`` serves and every object's surface scale
+    once, and write them to ``path`` for :class:`ShapeNetVecSetDataset`'s
+    ``layout_index``. The index describes the files as they are: rewriting a pool file
+    afterwards requires a new index.
+    """
+    from multiprocessing import Pool
+
+    extra_dirs = [
+        d for d in (dataset.sdf_dir, dataset.teacher_logit_dir) if d is not None
+    ]
+    dirs = (dataset.point_dir, dataset.surface_dir, extra_dirs)
+    layouts, scales = {}, {}
+    with Pool(processes) as pool:
+        for item, scale, entries in pool.imap_unordered(
+            _index_object, ((dirs, item) for item in dataset.items), chunksize=64
+        ):
+            scales[item] = scale
+            layouts.update(entries)
+    tmp = Path(f"{path}.tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump({"layouts": layouts, "scales": scales}, f, protocol=5)
+    tmp.rename(path)

@@ -17,12 +17,13 @@ from .preprocess import (
     build_vecset_dataset,
     preprocess_mesh,
 )
-from .vecset import ShapeNetVecSetDataset
+from .vecset import ShapeNetVecSetDataset, write_layout_index
 
 __all__ = [
     "MeshOccupancyDataset",
     "SdfGenSettings",
     "ShapeNetVecSetDataset",
+    "write_layout_index",
     "TrainingConfig",
     "axis_scaling",
     "build_vecset_dataset",
