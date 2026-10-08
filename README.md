@@ -156,7 +156,7 @@ For pipelines whose wall clock is dominated by the decode forward+backward itsel
 | **8** | [cod-vae-8x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x4-tiny) | [cod-vae-8x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x8-tiny) | [cod-vae-8x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x16-tiny) | [cod-vae-8x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-8x32-tiny) |
 | **16** | [cod-vae-16x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x4-tiny) | [cod-vae-16x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x8-tiny) | [cod-vae-16x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x16-tiny) | [cod-vae-16x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-16x32-tiny) |
 | **32** | [cod-vae-32x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-32x4-tiny) | [cod-vae-32x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-32x8-tiny) | [cod-vae-32x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-32x16-tiny) | [cod-vae-32x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-32x32-tiny) |
-| **64** | [cod-vae-64x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-64x4-tiny) | [cod-vae-64x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-64x8-tiny) | [cod-vae-64x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-64x16-tiny) | *training* |
+| **64** | [cod-vae-64x4-tiny](https://huggingface.co/TimSchneider42/cod-vae-64x4-tiny) | [cod-vae-64x8-tiny](https://huggingface.co/TimSchneider42/cod-vae-64x8-tiny) | [cod-vae-64x16-tiny](https://huggingface.co/TimSchneider42/cod-vae-64x16-tiny) | [cod-vae-64x32-tiny](https://huggingface.co/TimSchneider42/cod-vae-64x32-tiny) |
 
 Reconstruction quality on ABC, measured exactly as for the grids above (**volume IoU / near-surface accuracy**, 128 held-out meshes):
 
@@ -166,11 +166,11 @@ Reconstruction quality on ABC, measured exactly as for the grids above (**volume
 | **8** | 0.649 / 0.694 | 0.727 / 0.735 | 0.766 / 0.755 | 0.788 / 0.769 |
 | **16** | 0.685 / 0.707 | 0.767 / 0.750 | 0.800 / 0.774 | 0.814 / 0.785 |
 | **32** | 0.716 / 0.717 | 0.801 / 0.769 | 0.824 / 0.791 | 0.832 / 0.799 |
-| **64** | 0.746 / 0.727 | 0.822 / 0.785 | 0.837 / 0.800 | — |
+| **64** | 0.746 / 0.727 | 0.822 / 0.785 | 0.837 / 0.800 | 0.842 / 0.806 |
 
 Against `cod-vae-16x8-small` (0.842 / 0.804), the extra speedup costs ~0.07 IoU at `16x8`.
 Like the `-small` grid, each `-tiny` model defines its **own latent space** despite the shared latent shape.
-See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-tiny-models-were-trained) for the architecture and exact training commands. Quality tracks the total latent budget: `8x16` and `16x8` (128 floats each) land within 0.001 IoU of each other. `64x32` is training and publishes when it finishes.
+See [TRAINING.md](TRAINING.md#how-the-published-cod-vae-nxm-tiny-models-were-trained) for the architecture and exact training commands. Quality tracks the total latent budget: `8x16` and `16x8` (128 floats each) land within 0.001 IoU of each other.
 
 ## Training
 
