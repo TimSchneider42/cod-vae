@@ -30,7 +30,6 @@ __all__ = [
     "MeshOccupancyDataset",
     "iterate_batches",
     "random_rotation",
-    "rotation_pair",
 ]
 
 
@@ -111,51 +110,6 @@ def random_rotation(rng: np.random.Generator, max_degrees: float | None = None):
     return _axis_angle(rng.standard_normal(3), angle)
 
 
-def rotation_pair(
-    item: dict[str, np.ndarray],
-    rng: np.random.Generator,
-    small_fraction: float = 0.5,
-    small_max_degrees: float = 30.0,
-) -> dict[str, np.ndarray]:
-    """
-    Turn a training item into two views of the same object for rotation-equivariant
-    training (CODVAEConfig.rotation_equivariant): the object is centered on its surface
-    centroid and scaled into the unit ball (so it stays inside the [-1, 1] cube at
-    every orientation), then rotated by a uniformly random R_a and by R_b = R_ab R_a.
-    R_ab is a small rotation (up to small_max_degrees, the tracking regime) with
-    probability small_fraction and uniform on SO(3) otherwise. Both views keep the same
-    surface points, so their farthest point samples correspond one to one.
-
-    Returns surface (2, N, 3), queries (2, Q, 3), the per-query arrays duplicated to
-    (2, Q), and "rotation" = R_ab (3, 3). Query points rotated out of the cube lie
-    outside the unit ball, hence outside the object, so their labels stay correct where
-    the decoder clamps them onto the cube's boundary.
-    """
-    surface, queries = item["surface"], item["queries"]
-    center = surface.mean(0)
-    radius = np.sqrt(((surface - center) ** 2).sum(-1).max())
-    scale = 0.999999 / max(radius, 0.1)
-    surface = (surface - center) * scale
-    queries = (queries - center) * scale
-
-    rot_a = random_rotation(rng)
-    if rng.random() < small_fraction:
-        rot_ab = random_rotation(rng, small_max_degrees)
-    else:
-        rot_ab = random_rotation(rng)
-    rots = np.stack([rot_a, rot_ab @ rot_a]).astype(np.float32)
-
-    out = {
-        key: np.stack([value, value])
-        for key, value in item.items()
-        if key not in ("surface", "queries")
-    }
-    out["surface"] = np.einsum("vij,nj->vni", rots, surface).astype(np.float32)
-    out["queries"] = np.einsum("vij,nj->vni", rots, queries).astype(np.float32)
-    out["rotation"] = rot_ab.astype(np.float32)
-    return out
-
-
 class MeshOccupancyDataset:
     """
     Training dataset over a set of meshes, which do not need to be watertight (the
@@ -193,9 +147,6 @@ class MeshOccupancyDataset:
         cache_dir: Path | str | None = None,
         seed: int = 0,
         settings: SdfGenSettings | None = None,
-        rotation_pairs: bool = False,
-        small_rotation_fraction: float = 0.5,
-        small_rotation_max_degrees: float = 30.0,
     ):
         if callable(meshes):
             if num_meshes is None:
@@ -219,10 +170,6 @@ class MeshOccupancyDataset:
         self.seed = seed
         self.epoch = 0
         self.settings = settings if settings is not None else SdfGenSettings()
-        # Serve every item as two rotated views of one object (see rotation_pair).
-        self.rotation_pairs = rotation_pairs
-        self.small_rotation_fraction = small_rotation_fraction
-        self.small_rotation_max_degrees = small_rotation_max_degrees
         self._pools: dict[int, dict[str, np.ndarray]] = {}
 
     def set_epoch(self, epoch: int) -> None:
@@ -286,13 +233,6 @@ class MeshOccupancyDataset:
             "queries": queries.astype(np.float32),
             "labels": labels.astype(np.float32),
         }
-        if self.rotation_pairs:
-            item = rotation_pair(
-                item,
-                rng,
-                self.small_rotation_fraction,
-                self.small_rotation_max_degrees,
-            )
         return item
 
     def precompute(self, verbose: bool = False) -> None:

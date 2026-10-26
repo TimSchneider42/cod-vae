@@ -506,9 +506,7 @@ class CODVAEBase(ABC):
         meshes = list(mesh) if batched else [mesh]
         points, transforms = [], []
         for m in meshes:
-            normalized, transform = normalize_to_cube(
-                m, object_scale, sphere=self.config.rotation_equivariant
-            )
+            normalized, transform = normalize_to_cube(m, object_scale)
             points.append(sample_surface_points(normalized, num_points, seed=seed))
             transforms.append(transform)
         latents = self._encode(np.stack(points))

@@ -136,32 +136,6 @@ def main() -> None:
         default=0.1,
         help="distance at which the signed distance targets saturate (with --sdf-dir)",
     )
-    parser.add_argument(
-        "--eq-weight",
-        type=float,
-        default=1.0,
-        help="weight of the rotation-equivariance loss (models built with --arch "
-        "rotation_equivariant=1, which train on two rotated views per item; "
-        "--batch-size then counts view pairs)",
-    )
-    parser.add_argument(
-        "--eq-warmup-epochs",
-        type=int,
-        default=10,
-        help="epochs over which the equivariance weight ramps up from a tenth",
-    )
-    parser.add_argument(
-        "--small-rotation-fraction",
-        type=float,
-        default=0.5,
-        help="share of view pairs related by a small rotation (the rest: uniform)",
-    )
-    parser.add_argument(
-        "--small-rotation-max-degrees",
-        type=float,
-        default=30.0,
-        help="largest angle of a small relative rotation between the two views",
-    )
     parser.add_argument("--seed", type=int, default=123456)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument(
@@ -235,9 +209,6 @@ def main() -> None:
         seed=args.seed,
         distill_coeff=args.distill_weight if args.distill_dir is not None else 0.0,
         distill_temperature=args.distill_temperature,
-        rotation_pairs=config.rotation_equivariant,
-        eq_coeff=args.eq_weight,
-        eq_warmup_epochs=args.eq_warmup_epochs,
         sdf_truncation=args.sdf_truncation if args.sdf_dir is not None else 0.0,
     )
     dataset = ShapeNetVecSetDataset(
@@ -246,9 +217,6 @@ def main() -> None:
         repeat=args.repeat,
         seed=args.seed,
         teacher_logit_dir=args.distill_dir,
-        rotation_pairs=config.rotation_equivariant,
-        small_rotation_fraction=args.small_rotation_fraction,
-        small_rotation_max_degrees=args.small_rotation_max_degrees,
         sdf_dir=args.sdf_dir,
         layout_index=args.layout_index,
     )

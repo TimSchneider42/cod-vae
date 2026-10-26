@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import warnings
 from pathlib import Path
 from typing import Dict
 
@@ -68,6 +69,13 @@ def save_npz(path: Path | str, config: CODVAEConfig, params: Params) -> None:
 def load_npz(path: Path | str) -> tuple[CODVAEConfig, Params]:
     """Load config and parameters from a file written by :func:`save_npz`."""
     data = np.load(path)
-    config = CODVAEConfig(**json.loads(str(data[_CONFIG_KEY])))
+    stored = json.loads(str(data[_CONFIG_KEY]))
+    # Checkpoints written by experimental branches can carry config fields this version
+    # no longer knows; they describe no weights, so drop them rather than fail the load.
+    known = {field.name for field in dataclasses.fields(CODVAEConfig)}
+    for key in sorted(set(stored) - known):
+        warnings.warn(f"ignoring unknown config field {key!r} in {path}")
+        del stored[key]
+    config = CODVAEConfig(**stored)
     params = {key: data[key] for key in data.files if key != _CONFIG_KEY}
     return config, params

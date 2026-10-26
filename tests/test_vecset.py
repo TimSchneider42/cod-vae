@@ -3,7 +3,7 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from cod_vae.training import ShapeNetVecSetDataset, TrainingConfig
+from cod_vae.training import ShapeNetVecSetDataset, TrainingConfig, random_rotation
 
 
 @pytest.fixture()
@@ -255,3 +255,14 @@ def test_vecset_layout_index(vecset_root, tmp_path):
         assert len(indexed._scales) == 4
     finally:
         vecset_module._PoolFile._index = {}
+
+
+def test_random_rotation():
+    rng = np.random.default_rng(0)
+    for max_degrees in (None, 30.0):
+        rotation = random_rotation(rng, max_degrees)
+        np.testing.assert_allclose(rotation @ rotation.T, np.eye(3), atol=1e-12)
+        assert np.isclose(np.linalg.det(rotation), 1.0)
+        if max_degrees is not None:
+            angle = np.degrees(np.arccos((np.trace(rotation) - 1) / 2))
+            assert angle <= max_degrees + 1e-6

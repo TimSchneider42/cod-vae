@@ -35,7 +35,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .data import axis_scaling, isotropic_scaling, rotation_pair
+from .data import axis_scaling, isotropic_scaling
 
 __all__ = ["ShapeNetVecSetDataset", "write_layout_index"]
 
@@ -153,9 +153,6 @@ class ShapeNetVecSetDataset:
         near_groups: int = 2,
         io_retry_seconds: float = 240.0,
         teacher_logit_dir: Path | str | None = None,
-        rotation_pairs: bool = False,
-        small_rotation_fraction: float = 0.5,
-        small_rotation_max_degrees: float = 30.0,
         sdf_dir: Path | str | None = None,
         layout_index: Path | str | None = None,
     ):
@@ -182,10 +179,6 @@ class ShapeNetVecSetDataset:
         # block out of each group to keep the mix of noise levels.
         self.near_groups = near_groups
         self.io_retry_seconds = io_retry_seconds
-        # Serve every item as two rotated views of one object (see rotation_pair).
-        self.rotation_pairs = rotation_pairs
-        self.small_rotation_fraction = small_rotation_fraction
-        self.small_rotation_max_degrees = small_rotation_max_degrees
         # A directory tree mirroring ShapeNetV2_point ({category}/{object_id}.npz with
         # "vol_sdf" and "near_sdf" rows aligned with the pool files; a category may
         # also point at pool files that carry them) makes every item also carry "sdf",
@@ -194,8 +187,6 @@ class ShapeNetVecSetDataset:
         # (an anisotropic stretch does not preserve distances); the distances scale
         # with it.
         self.sdf_dir = Path(sdf_dir) if sdf_dir is not None else None
-        if self.sdf_dir is not None and rotation_pairs:
-            raise NotImplementedError("rotation pairs do not rescale signed distances")
         self.epoch = 0
         self._scales: dict[tuple[str, str], float] = {}
         # A file written by write_layout_index for this dataset: every pool file's
@@ -384,13 +375,6 @@ class ShapeNetVecSetDataset:
             "labels": labels,
             **item,
         }
-        if self.rotation_pairs:
-            item = rotation_pair(
-                item,
-                rng,
-                self.small_rotation_fraction,
-                self.small_rotation_max_degrees,
-            )
         return item
 
 

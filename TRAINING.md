@@ -196,31 +196,7 @@ vae.push_to_hub("you/cod-vae-m32")  # weights you trained yourself are yours to 
 
 A quick qualitative check: encode and decode a few validation shapes (`ShapeNetVecSetDataset(root_dir, split="val")` provides surface points and labeled queries, so occupancy accuracy/IoU can be computed by comparing `vae.decode(latents, queries) > 0` against the labels).
 
-## 8. Rotation-equivariant latents
-
-`--arch rotation_equivariant=1` trains a model whose latent rotates along with the object, for consumers that track it, say, across frames. Every latent vector (and every encoder embedding) is read as groups of four channels `[x, y, z, s]`: a 3-vector that should rotate with the input and a scalar that should not, so `latent_dim` (and `embed_dim`) must be multiples of 4. Training asks `z(R x) = rho(R) z(x)`, `rho(R)` rotating each group's 3-vector by `R`. The architecture is unchanged; the property is learned:
-
-- **Rotation pairs.** Each training item becomes two views of one object, centered on its surface centroid and scaled into the unit ball (the bounding box is not rotation-invariant), turned by a random `R_a` and by `R_b = R_ab R_a`, `R_ab` being a small rotation (up to 30°) half of the time and uniform otherwise. `--batch-size` then counts view pairs, so a step processes twice as many point clouds; halving `--batch-size` and `--repeat` keeps the compute per step and per epoch of a regular run (the LR scaling counts views).
-- **Equivariance loss.** Over the slots of the two views, the vector channels' `||b - R_ab a||^2` relative to their own mean squared norm plus the scalar channels' `(b - a)^2` relative to their variance, times `eq_coeff`. Normalizing each kind by itself matters: a loss normalized over all channels together is minimized by shrinking the vectors to nothing and keeping everything in the scalars (the first run did exactly that within five epochs). The weight is ramped up from a tenth over the first 10 epochs (`--eq-weight`, `--eq-warmup-epochs`). Stage 1 applies it to the layer-normalized encoder embeddings, which is what stage 2 reads and reconstructs; stage 2 applies it to the posterior means. Both stages are needed: stage 2 freezes the encoder, so it can only keep a property stage 1 established.
-- **Isotropic posterior.** Each group has two log-variances, one shared by the three vector channels and one for the scalar, so the posterior noise is spherical and sampling commutes with rotation (`latent_proj_in` emits `latent_dim + latent_dim / 2` moments). The N(0, I) prior is rotation-invariant, so the KL term needs no change.
-- **Slot correspondence.** Farthest point sampling starts at the point farthest from the centroid instead of the first input point, and the slots keep the FPS pick order instead of a lexicographic sort of world coordinates, which swaps slots whenever two of them cross under rotation. Slot `j` therefore means the same thing at every orientation, and the latent no longer depends on the order of the input points.
-
-```bash
-# Stage 1 (single GPU: 128 pairs = 256 point clouds per step, same as the tiny recipe)
-torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-eq-m16/stage1 \
-    --stage 1 --num-latents 16 --epochs 200 --batch-size 128 \
-    --repeat 4 --num-workers 10 --tf32 --resume $TINY_ARCH --arch rotation_equivariant=1
-
-# Stage 2 (inherits rotation_equivariant from the checkpoint)
-torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged runs/tiny-eq-m16/stage2_d8 \
-    --stage 2 --init-from runs/tiny-eq-m16/stage1/checkpoint_last.npz \
-    --latent-dim 8 --epochs 100 --batch-size 256 \
-    --repeat 4 --num-workers 10 --tf32 --resume --arch num_latent_layers=6
-```
-
-`encode_mesh` normalizes such models with the same centroid-plus-ball convention (`normalize_to_cube(..., sphere=True)`); feed `encode` point clouds normalized that way. Only the torch trainer implements the rotation pairs; both backends run the resulting models.
-
-## 9. Signed distance targets
+## 8. Signed distance targets
 
 Occupancy labels flip wholesale under small displacements of thin geometry: shift a 1 mm plate by 1 mm and every label inside it changes. A signed distance moves by at most the displacement, so training on distances asks for a decoder (and, through it, a latent) that changes smoothly with the shape. `--sdf-dir` switches the reconstruction loss to truncated signed distances:
 
@@ -228,7 +204,7 @@ Occupancy labels flip wholesale under small displacements of thin geometry: shif
 - **Data.** A tree mirroring `ShapeNetV2_point`, `<category>/<object_id>.npz` with `vol_sdf` and `near_sdf` (negative inside) row-aligned with the pool files' `vol_points` / `near_points`. Pool files that carry those arrays themselves serve as their own distance files (link the category in). Objects without a distance file are left out.
 - **Augmentation.** The anisotropic AxisScaling does not preserve distances, so with distance targets the scaling is isotropic (one random factor in [0.75, 1.25]), and the served distances are scaled by the same factor as the points.
 
-The distances must be computed against the same watertight mesh the occupancy labels came from, at the stored (float16) query points, so their signs reproduce the labels; the `cod-vae-dataset` pipeline's mesh is reproducible from each object's seed. Rotation pairs and distillation do not combine with distance targets.
+The distances must be computed against the same watertight mesh the occupancy labels came from, at the stored (float16) query points, so their signs reproduce the labels; the `cod-vae-dataset` pipeline's mesh is reproducible from each object's seed. Distillation does not combine with distance targets.
 
 ```bash
 torchrun --nproc_per_node=1 examples/train_shapenet.py data/merged-sdf runs/tiny-sdf-m16/stage1 \
