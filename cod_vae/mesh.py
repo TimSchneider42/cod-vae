@@ -142,7 +142,7 @@ def occupancy_grid_to_mesh(
     """
     if logits.min() >= 0 or logits.max() <= 0:
         return trimesh.Trimesh()
-    if _warp_cuda_available():
+    if warp_cuda_available():
         return occupancy_grid_to_mesh_warp(logits, transform)
     return _occupancy_grid_to_mesh_skimage(logits, transform)
 
@@ -163,7 +163,7 @@ def _occupancy_grid_to_mesh_skimage(
 
 
 @lru_cache(maxsize=1)
-def _warp_cuda_available() -> bool:
+def warp_cuda_available() -> bool:
     """Whether a CUDA device Warp can use is present. Cached: it cannot change within a
     process, and ``wp.init()`` is not cheap."""
     wp.init()

@@ -33,6 +33,7 @@ from ..mesh import (
     CubeTransform,
     occupancy_grid_to_mesh,
     occupancy_grid_to_mesh_warp,
+    warp_cuda_available,
 )
 from .modules import (
     CrossAttention,
@@ -707,7 +708,8 @@ class CODVAETorch(CODVAEBase):
         adopts the torch buffer via DLPack and marching cubes runs where the data
         already is. Falls back to the host implementation off CUDA.
         """
-        if self.device.type != "cuda":
+        # ROCm builds report device type "cuda" too, but Warp runs on NVIDIA only.
+        if self.device.type != "cuda" or not warp_cuda_available():
             return occupancy_grid_to_mesh(self._to_numpy(logits), transform)
         return occupancy_grid_to_mesh_warp(logits.float().contiguous(), transform)
 
