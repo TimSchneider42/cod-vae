@@ -11,7 +11,7 @@ Training follows the two-stage recipe of the paper:
 Two command line entry points appear below:
 
 - `cod-vae-train` is the general trainer: it takes either a directory of meshes or a preprocessed dataset root and covers the common flags.
-- `examples/train_shapenet.py` is the reference-recipe example for preprocessed roots; it additionally exposes `--accumulate`, `--latent-dim`, `--resume` and `--tf32`, and defaults to the reference's hyperparameters (seed 123456, per-stage batch sizes). All commands in this guide that replicate the paper use it.
+- `examples/train_shapenet.py` is the reference-recipe example for preprocessed roots; it additionally exposes `--accumulate`, `--latent-dim`, `--resume`, `--tf32` and `--file-system-sharing`, and defaults to the reference's hyperparameters (seed 123456, per-stage batch sizes). All commands in this guide that replicate the paper use it.
 
 Both are thin wrappers around the same Python API (section 6).
 
@@ -114,6 +114,7 @@ Three flags matter for long runs on the torch backend:
 
 - `--resume` continues in the output directory where the last completed epoch left off, restoring the optimizer and LR schedule from `train_state_last.pt` (written atomically after each epoch). A run that outlives a scheduler's time limit, or dies on a node failure, just gets resubmitted.
 - `--tf32` allows TF32 matmuls and convolutions on Ampere+ GPUs: 1.65x faster than full float32 on an H100, and still more precise than the reference's 16-mixed setup.
+- `--file-system-sharing` makes DataLoader workers hand batches over through named shared-memory files instead of file descriptors. On LUMI (MI250X, 4 GCDs per run) the default strategy killed a worker after ~13 minutes with `could not unlink the shared memory file`; with this flag a 107-minute run was clean.
 - `--repeat` sets how often the dataset is repeated per epoch (default 16, the reference's value for ~35k ShapeNet shapes). On a substantially larger dataset, lowering it keeps an epoch — and therefore the 100-epoch schedule — comparable in size.
 
 For the JAX backend, run the same script with `--backend jax` from a single process; it shards batches across all visible GPUs automatically.

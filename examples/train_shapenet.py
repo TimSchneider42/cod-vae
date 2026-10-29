@@ -150,9 +150,20 @@ def main() -> None:
         help="allow TF32 matmuls/convolutions on Ampere+ GPUs: faster than float32 "
         "and still more precise than the reference's 16-mixed precision (torch backend)",
     )
+    parser.add_argument(
+        "--file-system-sharing",
+        action="store_true",
+        help="pass DataLoader batches through named shared-memory files instead of file "
+        "descriptors; works around multi-GPU workers dying with 'could not unlink the "
+        "shared memory file' on LUMI (torch backend)",
+    )
     args = parser.parse_args()
-    if (args.resume or args.tf32) and args.backend != "torch":
-        parser.error("--resume and --tf32 are only supported by the torch backend")
+    if (
+        args.resume or args.tf32 or args.file_system_sharing
+    ) and args.backend != "torch":
+        parser.error(
+            "--resume, --tf32 and --file-system-sharing are only supported by the torch backend"
+        )
     if args.distill_dir is not None and args.backend != "torch":
         parser.error("--distill-dir is only supported by the torch backend")
     if args.sdf_dir is not None and args.backend != "torch":
@@ -234,6 +245,9 @@ def main() -> None:
         if args.tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
+        if args.file_system_sharing:
+            # The forked DataLoader workers inherit the strategy.
+            torch.multiprocessing.set_sharing_strategy("file_system")
         train(
             config,
             train_config,
